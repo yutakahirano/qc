@@ -1,6 +1,7 @@
 # cf. https://qiskit.org/textbook/ja/ch-algorithms/grover.html
 
 
+import math
 import qiskit
 from qiskit import QuantumCircuit, Aer, transpile
 
@@ -29,7 +30,9 @@ def diffuser(n):
     return gate
 
 
-def grover(n, uf, k):
+def grover(n, uf, k = None):
+    if k is None:
+        k = math.floor(math.sqrt(2**n) * math.pi / 4 - 0.5)
     qc = QuantumCircuit(n)
 
     qc.h(range(n))
@@ -40,7 +43,7 @@ def grover(n, uf, k):
     return qc
 
 
-def example(n, k):
+def example(n, k = None):
     # Construct an example U_f. In this example, |1....1> is the solution.
     ufc = QuantumCircuit(n)
     ufc.h(n - 1)
