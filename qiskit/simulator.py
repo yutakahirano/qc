@@ -123,14 +123,14 @@ def inject_p1_errors(
         z_errors: ErrorSet,
         distribution: ErrorDistribution):
     for j in range(code_size):
-        if distribution.has_measurement_error():
+        if distribution.has_p1_error():
             # X errors
             x_errors.add(j)
-        if distribution.has_measurement_error():
+        if distribution.has_p1_error():
             # Y errors
             x_errors.add(j)
             z_errors.add(j)
-        if distribution.has_measurement_error():
+        if distribution.has_p1_error():
             # Z errors
             z_errors.add(j)
 
