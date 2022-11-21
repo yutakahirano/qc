@@ -208,7 +208,7 @@ def simulate(circuit: qiskit.QuantumCircuit, distribution: ErrorDistribution):
 
     for gate in circuit.data:
         logging.info('operation name = {}'.format(gate.operation.name))
-        if gate.operation.name in {'h', 's'}:
+        if gate.operation.name in {'h', 's', 'sdg'}:
             # one-qubit clifford gate
             index = circuit.qubits.index(gate.qubits[0])
 
@@ -226,6 +226,13 @@ def simulate(circuit: qiskit.QuantumCircuit, distribution: ErrorDistribution):
 
                 # Update the error data.
                 # ZS acts on each qubit, and ZSX = -YZS and (ZS)Z = Z(ZS).
+                z_errors[index] += x_errors[index]
+            elif gate.operation.name == 'sdg':
+                # Run the logical operation.
+                circuit_with_error.sdg(index)
+
+                # Update the error data.
+                # This action is the inverse of the action for the S gate.
                 z_errors[index] += x_errors[index]
             else:
                 assert False, 'UNREACHABLE'
