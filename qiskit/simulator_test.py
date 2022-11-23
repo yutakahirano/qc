@@ -38,9 +38,28 @@ class TestErrorSet(unittest.TestCase):
         self.assertTrue(errors.get(7))
         self.assertFalse(errors.get(8))
 
+    def test_clear(self):
+        errors = ErrorSet({1, 3, 8})
+        errors.clear(0)
+        self.assertEqual(errors, ErrorSet({1, 3, 8}))
+        errors.clear(1)
+        self.assertEqual(errors, ErrorSet({3, 8}))
+        errors.clear(2)
+        self.assertEqual(errors, ErrorSet({3, 8}))
+        errors.clear(3)
+        self.assertEqual(errors, ErrorSet({8}))
+
     def test_addition(self):
         self.assertEqual(ErrorSet() + ErrorSet(), ErrorSet())
         self.assertEqual(ErrorSet({1, 2}) + ErrorSet({2, 5}), ErrorSet({1, 5}))
+
+    def test_inplace_addition(self):
+        errors = ErrorSet({1, 2, 3})
+        original = errors
+        errors += ErrorSet({7, 2})
+
+        self.assertEqual(errors, ErrorSet({1, 3, 7}))
+        self.assertEqual(original, ErrorSet({1, 3, 7}))
 
 
 class TestErrorGuessing(unittest.TestCase):
