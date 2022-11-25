@@ -100,6 +100,23 @@ def guess_errors(errors: ErrorSet):
     return ErrorSet({index})
 
 
+def calculate_deviation(errors: ErrorSet):
+    num_errors = len(errors)
+    # Fast path
+    if num_errors <= 1:
+        return num_errors
+
+    g1 = ErrorSet({3, 4, 5, 6})
+    g2 = ErrorSet({1, 2, 5, 6})
+    g3 = ErrorSet({0, 2, 4, 6})
+
+    return min(
+        num_errors,
+        len(g1 + errors), len(g2 + errors), len(g3 + errors),
+        len(g1 + g2 + errors), len(g1 + g3 + errors),
+        len(g2 + g3 + errors), len(g1 + g2 + g3 + errors))
+
+
 def is_logically_trivial(errors: ErrorSet):
     if errors == ErrorSet():
         return True

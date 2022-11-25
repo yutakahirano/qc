@@ -4,6 +4,28 @@ import unittest
 from simulator import *
 
 
+class CountErrorDistribution(ErrorDistribution):
+    def __init__(self, count):
+        self.current = 0
+        self.count = count
+
+    def has_p1_error(self):
+        self.current += 1
+        return self.current - 1 == self.count
+
+    def has_p2_error(self):
+        self.current += 1
+        return self.current - 1 == self.count
+
+    def has_measurement_error(self):
+        self.current += 1
+        return self.current - 1 == self.count
+
+    def has_preparation_error(self):
+        self.current += 1
+        return self.current - 1 == self.count
+
+
 class TestErrorSet(unittest.TestCase):
     def test_iteration(self):
         self.assertEqual(list(ErrorSet()), [])
@@ -63,6 +85,18 @@ class TestErrorSet(unittest.TestCase):
 
 
 class TestErrorGuessing(unittest.TestCase):
+    def test_deviation(self):
+        self.assertEqual(0, calculate_deviation(ErrorSet({})))
+        self.assertEqual(0, calculate_deviation(ErrorSet({3, 4, 5, 6})))
+        self.assertEqual(0, calculate_deviation(ErrorSet({1, 2, 5, 6})))
+        self.assertEqual(0, calculate_deviation(ErrorSet({0, 2, 4, 6})))
+        self.assertEqual(0, calculate_deviation(ErrorSet({1, 2, 3, 4})))
+        self.assertEqual(0, calculate_deviation(ErrorSet({0, 1, 3, 6})))
+        self.assertEqual(1, calculate_deviation(ErrorSet({2})))
+        self.assertEqual(2, calculate_deviation(ErrorSet({2, 3})))
+        self.assertEqual(1, calculate_deviation(ErrorSet({3, 4, 5})))
+        self.assertEqual(3, calculate_deviation(ErrorSet({1, 3, 5})))
+
     def test_guessing(self):
         self.assertEqual(guess_errors(ErrorSet()), ErrorSet())
 
@@ -72,3 +106,12 @@ class TestErrorGuessing(unittest.TestCase):
             self.assertEqual(guess_errors(errors), errors)
 
         self.assertEqual(guess_errors(ErrorSet({1, 3})), ErrorSet({5}))
+
+
+class TestStatePreparation(unittest.TestCase):
+    def test_fault_tolerance(self):
+        for i in range(1000):
+            distribution = CountErrorDistribution(i)
+            (x_errors, z_errors) = state_preparation_errors(distribution)
+            # We ignore Z errors because we're preparing a logical |0>.
+            self.assertLess(calculate_deviation(x_errors), 2)
