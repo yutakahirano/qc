@@ -57,6 +57,9 @@ class ErrorSet:
             set = set // 2
 
 
+code_size = 7
+
+
 class ErrorDistribution:
     def __init__(self, p1, p2, p_measurement, p_preparation):
         self.p1 = p1
@@ -77,27 +80,244 @@ class ErrorDistribution:
         return random.uniform(0, 1) < self.p_preparation
 
 
-def guess_errors(errors: ErrorSet):
-    # m1 is set to true when the corresponding generator detects an error.
-    m1 = errors.get(3) ^ errors.get(4) ^ errors.get(5) ^ errors.get(6)
-    # m2 is set to true when the corresponding generator detects an error.
-    m2 = errors.get(1) ^ errors.get(2) ^ errors.get(5) ^ errors.get(6)
-    # m3 is set to true when the corresponding generator detects an error.
-    m3 = errors.get(0) ^ errors.get(2) ^ errors.get(4) ^ errors.get(6)
+def place_physical_h(
+        x_errors: ErrorSet,
+        z_errors: ErrorSet,
+        index: int,
+        distribution: ErrorDistribution):
+    # Update the error data.
+    # We swap the X error and Z error, given HX = ZH and HZ = XH.
+    had_x_error = x_errors.get(index)
+    had_z_error = z_errors.get(index)
+    if had_x_error:
+        x_errors.add(index)
+        z_errors.add(index)
+    if had_z_error:
+        z_errors.add(index)
+        x_errors.add(index)
 
-    logging.info('m1 = {}, m2 = {}, m3 = {}'.format(m1, m2, m3))
+    if distribution.has_p1_error():
+        # X error
+        x_errors.add(index)
+    if distribution.has_p1_error():
+        # Y error
+        x_errors.add(index)
+        z_errors.add(index)
+    if distribution.has_p1_error():
+        # Z error
+        z_errors.add(index)
 
-    if not m1 and not m2 and not m3:
-        # No errors
-        return ErrorSet()
-    index = -1
-    if m1:
-        index += 4
-    if m2:
-        index += 2
-    if m3:
-        index += 1
-    return ErrorSet({index})
+
+def place_physical_cnot(
+        x_errors: ErrorSet,
+        z_errors: ErrorSet,
+        control: int,
+        target: int,
+        distribution: ErrorDistribution):
+    # Update the error data.
+    # CX * X_CONTROL  = X_CONTROL * X_TARGET * CX
+    # CX * X_TARGET   = X_TARGET * CX
+    # CX * Z_CONTROL  = Z_CONTROL * CX
+    # CX * Z_TARGET   = Z_CONTROL * Z_TARGET * CX
+    if x_errors.get(control):
+        x_errors.add(target)
+    if z_errors.get(target):
+        z_errors.add(control)
+
+    inject_p2_errors_on_pysical_qubit(
+        x_errors, z_errors, control, target, distribution)
+
+
+# Returns (r1, r2) where
+#  - `r1` is True when the measurement result is trivial, and
+#  - `r2` is True when the flag qubit measurement result is trivial.
+def run_x_stabilizer_measurement(
+        x_errors: ErrorSet,
+        z_errors: ErrorSet,
+        pattern: List[int],
+        distribution: ErrorDistribution,
+        with_flag: bool) -> Tuple[bool, bool]:
+    assert len(pattern) == 4
+    # Create two ancilla qubits.
+    a1 = code_size
+    a2 = code_size + 1
+
+    for j in [a1, a2]:
+        if distribution.has_preparation_error():
+            # X error
+            x_errors.add(j)
+        if distribution.has_preparation_error():
+            # Y error
+            x_errors.add(j)
+            z_errors.add(j)
+        if distribution.has_preparation_error():
+            # Z error
+            z_errors.add(j)
+
+    place_physical_h(x_errors, z_errors, a1, distribution)
+    place_physical_cnot(x_errors, z_errors, a1, pattern[0], distribution)
+    if with_flag:
+        place_physical_cnot(x_errors, z_errors, a1, a2, distribution)
+    place_physical_cnot(x_errors, z_errors, a1, pattern[1], distribution)
+    place_physical_cnot(x_errors, z_errors, a1, pattern[2], distribution)
+    if with_flag:
+        place_physical_cnot(x_errors, z_errors, a1, a2, distribution)
+    place_physical_cnot(x_errors, z_errors, a1, pattern[3], distribution)
+    place_physical_h(x_errors, z_errors, a1, distribution)
+
+    r1 = not x_errors.get(a1)
+    if distribution.has_measurement_error():
+        r1 = not r1
+    if with_flag:
+        r2 = not x_errors.get(a2)
+        if distribution.has_measurement_error():
+            r2 = not r2
+    else:
+        r2 = True
+
+    # Clear errors on the ancilla qubits.
+    x_errors.clear(a1)
+    x_errors.clear(a2)
+    z_errors.clear(a1)
+    z_errors.clear(a2)
+
+    return (r1, r2)
+
+
+# Returns (r1, r2) where
+#  - `r1` is True when the measurement result is trivial, and
+#  - `r2` is True when the flag qubit measurement result is trivial.
+def run_z_stabilizer_measurement(
+        x_errors: ErrorSet,
+        z_errors: ErrorSet,
+        pattern: List[int],
+        distribution: ErrorDistribution,
+        with_flag: bool) -> Tuple[bool, bool]:
+    assert len(pattern) == 4
+    # Create two ancilla qubits.
+    a1 = code_size
+    a2 = code_size + 1
+    for j in [a1, a2]:
+        if distribution.has_preparation_error():
+            # X error
+            x_errors.add(j)
+        if distribution.has_preparation_error():
+            # Y error
+            x_errors.add(j)
+            z_errors.add(j)
+        if distribution.has_preparation_error():
+            # Z error
+            z_errors.add(j)
+
+    place_physical_h(x_errors, z_errors, a2, distribution)
+    place_physical_cnot(x_errors, z_errors, pattern[0], a1, distribution)
+    if with_flag:
+        place_physical_cnot(x_errors, z_errors, a2, a1, distribution)
+    place_physical_cnot(x_errors, z_errors, pattern[1], a1, distribution)
+    place_physical_cnot(x_errors, z_errors, pattern[2], a1, distribution)
+    if with_flag:
+        place_physical_cnot(x_errors, z_errors, a2, a1, distribution)
+    place_physical_cnot(x_errors, z_errors, pattern[3], a1, distribution)
+    place_physical_h(x_errors, z_errors, a2, distribution)
+
+    r1 = not x_errors.get(a1)
+    if distribution.has_measurement_error():
+        r1 = not r1
+    if with_flag:
+        r2 = not x_errors.get(a2)
+        if distribution.has_measurement_error():
+            r2 = not r2
+    else:
+        r2 = True
+
+    # Clear errors on the ancilla qubits.
+    x_errors.clear(a1)
+    x_errors.clear(a2)
+    z_errors.clear(a1)
+    z_errors.clear(a2)
+
+    return (r1, r2)
+
+
+# Guesses qubit errors and returns X and Z correction actions.
+# See https://arxiv.org/abs/1705.02329 for the error syndrome measurement.
+def guess_errors(
+        x_errors: ErrorSet,
+        z_errors: ErrorSet,
+        distribution: ErrorDistribution) -> Tuple[ErrorSet, ErrorSet]:
+    saw_non_trivial_syndrome = False
+    flag_raised = None
+
+    # g1 = X3X4X5X6
+    # g2 = X1X2X5X6
+    # g3 = X0X2X4X6
+    # g4 = Z3Z4Z5Z6
+    # g5 = Z1Z2Z5Z6
+    # g6 = Z0Z2Z4Z6
+    patterns = [[3, 4, 5, 6], [1, 2, 5, 6], [0, 2, 4, 6]]
+
+    for i, pattern in enumerate(patterns):
+        (r1, r2) = run_x_stabilizer_measurement(
+            x_errors, z_errors, pattern, distribution, with_flag=True)
+        if not r2:
+            flag_raised = ('x', i)
+            break
+        if not r1:
+            saw_non_trivial_syndrome = True
+            break
+
+        (r1, r2) = run_z_stabilizer_measurement(
+            x_errors, z_errors, pattern, distribution, with_flag=True)
+
+        if not r2:
+            flag_raised = ('z', i)
+            break
+        if not r1:
+            saw_non_trivial_syndrome = True
+            break
+
+    logging.info('saw_non_trivial_syndrome = {}, flag_raised = {}'.format(
+        saw_non_trivial_syndrome, flag_raised))
+    if not saw_non_trivial_syndrome and flag_raised is None:
+        # No errors are found.
+        return (ErrorSet({}), ErrorSet({}))
+
+    # measurement results
+    m = []
+    for pattern in patterns:
+        (r1, _) = run_x_stabilizer_measurement(
+            x_errors, z_errors, pattern, distribution, with_flag=False)
+        m.append(0 if r1 else 1)
+    for pattern in patterns:
+        (r1, _) = run_z_stabilizer_measurement(
+            x_errors, z_errors, pattern, distribution, with_flag=False)
+        m.append(0 if r1 else 1)
+
+    x_index = m[3] * 4 + m[4] * 2 + m[5]
+    z_index = m[0] * 4 + m[1] * 2 + m[2]
+
+    guessed_x_errors = ErrorSet()
+    guessed_z_errors = ErrorSet()
+
+    if x_index > 0:
+        guessed_x_errors.add(x_index - 1)
+    if z_index > 0:
+        guessed_z_errors.add(z_index - 1)
+
+    if flag_raised == ('x', 0) and x_index == 1:
+        guessed_x_errors = ErrorSet({5, 6})
+    elif flag_raised == ('x', 1) and x_index == 1:
+        guessed_x_errors = ErrorSet({5, 6})
+    elif flag_raised == ('x', 2) and x_index == 2:
+        guessed_x_errors = ErrorSet({4, 6})
+    elif flag_raised == ('z', 0) and z_index == 1:
+        guessed_z_errors = ErrorSet({5, 6})
+    elif flag_raised == ('z', 1) and z_index == 1:
+        guessed_z_errors = ErrorSet({5, 6})
+    elif flag_raised == ('z', 2) and z_index == 2:
+        guessed_z_errors = ErrorSet({4, 6})
+
+    return (guessed_x_errors, guessed_z_errors)
 
 
 def calculate_deviation(errors: ErrorSet):
@@ -115,35 +335,6 @@ def calculate_deviation(errors: ErrorSet):
         len(g1 + errors), len(g2 + errors), len(g3 + errors),
         len(g1 + g2 + errors), len(g1 + g3 + errors),
         len(g2 + g3 + errors), len(g1 + g2 + g3 + errors))
-
-
-def is_logically_trivial(errors: ErrorSet):
-    if errors == ErrorSet():
-        return True
-
-    g1 = ErrorSet({3, 4, 5, 6})
-    g2 = ErrorSet({1, 2, 5, 6})
-    g3 = ErrorSet({0, 2, 4, 6})
-
-    if errors == g1 or errors == g2 or errors == g3:
-        return True
-
-    g12 = g1 + g2
-    g13 = g1 + g3
-    g23 = g2 + g3
-
-    if errors == g12 or errors == g13 or errors == g23:
-        return True
-
-    g123 = g1 + g2 + g3
-
-    if errors == g123:
-        return True
-
-    return False
-
-
-code_size = 7
 
 
 def inject_p1_errors(
@@ -306,52 +497,6 @@ def inject_p2_errors_on_pysical_qubit(
         z_errors.add(target)
 
 
-def inject_syndrome_measurement_errors(
-        x_errors: ErrorSet,
-        z_errors: ErrorSet,
-        distribution: ErrorDistribution):
-    # g1 and g4
-    for _ in range(2):
-        for j in [3, 4, 5, 6]:
-            if distribution.has_measurement_error():
-                # X errors
-                x_errors.add(j)
-            if distribution.has_measurement_error():
-                # Y errors
-                x_errors.add(j)
-                z_errors.add(j)
-            if distribution.has_measurement_error():
-                # Z errors
-                z_errors.add(j)
-    # g2 and g5
-    for _ in range(2):
-        for j in [1, 2, 5, 6]:
-            if distribution.has_measurement_error():
-                # X errors
-                x_errors.add(j)
-            if distribution.has_measurement_error():
-                # Y errors
-                x_errors.add(j)
-                z_errors.add(j)
-            if distribution.has_measurement_error():
-                # Z errors
-                z_errors.add(j)
-
-    # g3 and g6
-    for _ in range(2):
-        for j in [0, 2, 4, 6]:
-            if distribution.has_measurement_error():
-                # X errors
-                x_errors.add(j)
-            if distribution.has_measurement_error():
-                # Y errors
-                x_errors.add(j)
-                z_errors.add(j)
-            if distribution.has_measurement_error():
-                # Z errors
-                z_errors.add(j)
-
-
 def state_preparation_errors(
         distribution: ErrorDistribution) -> Tuple[ErrorSet, ErrorSet]:
     # See Figure 1.c in https://www.nature.com/articles/srep19578.
@@ -373,27 +518,7 @@ def state_preparation_errors(
 
         # Run H gates on these three qubits:
         for j in [1, 2, 3]:
-            # Update the error data.
-            # We swap the X error and Z error, given HX = ZH and HZ = XH.
-            had_x_error = x_errors.get(j)
-            had_z_error = z_errors.get(j)
-            if had_x_error:
-                x_errors.add(j)
-                z_errors.add(j)
-            if had_z_error:
-                z_errors.add(j)
-                x_errors.add(j)
-
-            if distribution.has_p1_error():
-                # X error
-                x_errors.add(j)
-            if distribution.has_p1_error():
-                # Y error
-                x_errors.add(j)
-                z_errors.add(j)
-            if distribution.has_p1_error():
-                # Z error
-                z_errors.add(j)
+            place_physical_h(x_errors, z_errors, j, distribution)
 
         # A list consisting of control and target qubit indices.
         cnots = [
@@ -401,17 +526,7 @@ def state_preparation_errors(
            (6, 4), (0, 7), (5, 7), (6, 7)
         ]
         for (control, target) in cnots:
-            # Update the error data.
-            # CX * X_CONTROL  = X_CONTROL * X_TARGET * CX
-            # CX * X_TARGET   = X_TARGET * CX
-            # CX * Z_CONTROL  = Z_CONTROL * CX
-            # CX * Z_TARGET   = Z_CONTROL * Z_TARGET * CX
-            if x_errors.get(control):
-                x_errors.add(target)
-            if z_errors.get(target):
-                z_errors.add(control)
-
-            inject_p2_errors_on_pysical_qubit(
+            place_physical_cnot(
                 x_errors, z_errors, control, target, distribution)
         verified = not x_errors.get(7)
         if distribution.has_measurement_error():
@@ -436,14 +551,14 @@ def inject_errors_on_error_correction(
         z_errors: ErrorSet,
         distribution: ErrorDistribution):
     for e in correction:
-        if distribution.has_measurement_error():
+        if distribution.has_p1_error():
             # X errors
             x_errors.add(e)
-        if distribution.has_measurement_error():
+        if distribution.has_p1_error():
             # Y errors
             x_errors.add(e)
             z_errors.add(e)
-        if distribution.has_measurement_error():
+        if distribution.has_p1_error():
             # Z errors
             z_errors.add(e)
 
@@ -457,12 +572,9 @@ def run_error_correction(
         x_errors: ErrorSet,
         z_errors: ErrorSet,
         distribution: ErrorDistribution) -> Tuple[bool, bool]:
-    # Inject errors generated by error syndrome measurements.
-    inject_syndrome_measurement_errors(x_errors, z_errors, distribution)
-
     # Try to correct errors.
-    x_correction = guess_errors(x_errors)
-    z_correction = guess_errors(z_errors)
+    (x_correction, z_correction) = guess_errors(
+        x_errors, z_errors, distribution)
     x_errors += x_correction
     z_errors += z_correction
 
@@ -473,13 +585,13 @@ def run_error_correction(
 
     has_x_logical_error = False
     has_z_logical_error = False
-    if not is_logically_trivial(x_errors):
+    if calculate_deviation(x_errors) >= 2:
         # There is no physical operation corresponding to this, so we
         # don't need to think about errors.
         x_errors += ErrorSet(range(code_size))
         has_x_logical_error = True
 
-    if not is_logically_trivial(z_errors):
+    if calculate_deviation(z_errors) >= 2:
         # There is no physical operation corresponding to this, so we
         # don't need to think about errors.
         z_errors += ErrorSet(range(code_size))
