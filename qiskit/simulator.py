@@ -57,7 +57,8 @@ class ErrorSet:
             set = set // 2
 
 
-code_size = 7
+CODE_SIZE = 7
+MEASUREMENT_REPETITION = 3
 
 
 class ErrorDistribution:
@@ -139,8 +140,8 @@ def run_x_stabilizer_measurement(
         with_flag: bool) -> Tuple[bool, bool]:
     assert len(pattern) == 4
     # Create two ancilla qubits.
-    a1 = code_size
-    a2 = code_size + 1
+    a1 = CODE_SIZE
+    a2 = CODE_SIZE + 1
 
     for j in [a1, a2]:
         if distribution.has_preparation_error():
@@ -195,8 +196,8 @@ def run_z_stabilizer_measurement(
         with_flag: bool) -> Tuple[bool, bool]:
     assert len(pattern) == 4
     # Create two ancilla qubits.
-    a1 = code_size
-    a2 = code_size + 1
+    a1 = CODE_SIZE
+    a2 = CODE_SIZE + 1
     for j in [a1, a2]:
         if distribution.has_preparation_error():
             # X error
@@ -341,7 +342,7 @@ def inject_p1_errors(
         x_errors: ErrorSet,
         z_errors: ErrorSet,
         distribution: ErrorDistribution):
-    for j in range(code_size):
+    for j in range(CODE_SIZE):
         if distribution.has_p1_error():
             # X errors
             x_errors.add(j)
@@ -360,7 +361,7 @@ def inject_p2_errors(
         control: int,
         target: int,
         distribution: ErrorDistribution):
-    for j in range(code_size):
+    for j in range(CODE_SIZE):
         if distribution.has_p2_error():
             # IX errors
             x_errors[target].add(j)
@@ -497,6 +498,25 @@ def inject_p2_errors_on_pysical_qubit(
         z_errors.add(target)
 
 
+# If logical X errors and Z errors are contained in `x_errors` and `z_errors`,
+# then move them to `circuit`.
+def move_logical_errors_to_circuit(
+        x_errors: ErrorSet,
+        z_errors: ErrorSet,
+        circuit: qiskit.QuantumCircuit,
+        index: int):
+    if calculate_deviation(x_errors) >= 2:
+        # There is no physical operation corresponding to this, so we
+        # don't need to think about errors.
+        x_errors += ErrorSet(range(CODE_SIZE))
+        circuit.x(index)
+    if calculate_deviation(z_errors) >= 2:
+        # There is no physical operation corresponding to this, so we
+        # don't need to think about errors.
+        z_errors += ErrorSet(range(CODE_SIZE))
+        circuit.z(index)
+
+
 def state_preparation_errors(
         distribution: ErrorDistribution) -> Tuple[ErrorSet, ErrorSet]:
     # See Figure 1.c in https://www.nature.com/articles/srep19578.
@@ -504,7 +524,7 @@ def state_preparation_errors(
         x_errors = ErrorSet()
         z_errors = ErrorSet()
         # Inject errors on 1-qubit state preparation.
-        for j in range(code_size):
+        for j in range(CODE_SIZE):
             if distribution.has_preparation_error():
                 # X error
                 x_errors.add(j)
@@ -545,6 +565,120 @@ def state_preparation_errors(
         return (x_errors, z_errors)
 
 
+# Verifies if the cat state is correctly set up by checking `x_errors` and
+# `z_errors`, and returns the result.
+# Note that this verification step itself may inject errors.
+def verify_cat_state(
+        x_errors: ErrorSet,
+        z_errors: ErrorSet,
+        distribution: ErrorDistribution) -> bool:
+    for i in range(0, CODE_SIZE):
+        for j in range(i + 1, CODE_SIZE):
+            # Define a 1-qubit ancilla and initialize it with |0>.
+            target = CODE_SIZE
+            if distribution.has_preparation_error():
+                # X error
+                x_errors.add(target)
+            if distribution.has_preparation_error():
+                # Y error
+                x_errors.add(target)
+                z_errors.add(target)
+            if distribution.has_preparation_error():
+                # Z error
+                z_errors.add(target)
+
+            place_physical_cnot(x_errors, z_errors, i, target, distribution)
+            place_physical_cnot(x_errors, z_errors, j, target, distribution)
+
+            verification_result = not x_errors.get(target)
+            if distribution.has_measurement_error():
+                verification_result = not verification_result
+
+            # We'll never use the ancilla, so let's clear the errors.
+            x_errors.clear(target)
+            z_errors.clear(target)
+
+            if not verification_result:
+                return False
+
+    return True
+
+
+# Prepares a cat state 1/sqrt(2) * (|0...0> + |1...1>), and returns attached
+# X errors and Z errors.
+def prepare_cat_state(
+        distribution: ErrorDistribution) -> Tuple[ErrorSet, ErrorSet]:
+    while True:
+        x_errors = ErrorSet()
+        z_errors = ErrorSet()
+
+        # Inject errors on 1-qubit state preparation.
+        for j in range(CODE_SIZE):
+            if distribution.has_preparation_error():
+                # X error
+                x_errors.add(j)
+            if distribution.has_preparation_error():
+                # Y error
+                x_errors.add(j)
+                z_errors.add(j)
+            if distribution.has_preparation_error():
+                # Z error
+                z_errors.add(j)
+
+        # Run an H gate on the first qubit.
+        place_physical_h(x_errors, z_errors, 0, distribution)
+
+        # Add CNOTs to create the cat state.
+        for target in range(CODE_SIZE):
+            place_physical_cnot(x_errors, z_errors, 0, target, distribution)
+
+        if verify_cat_state(x_errors, z_errors, distribution):
+            return (x_errors, z_errors)
+
+        # Verification failed, let's set up the cat state again...
+
+
+def place_measurement(
+        x_errors: ErrorSet,
+        z_errors: ErrorSet,
+        circuit: qiskit.QuantumCircuit,
+        q_index: int,
+        c_index: int,
+        distribution: ErrorDistribution):
+    for trial in range(MEASUREMENT_REPETITION):
+        # Create a cat state.
+        (ancilla_x_errors, ancilla_z_errors) = prepare_cat_state(distribution)
+
+        # Copy the ancilla error information.
+        for i in range(CODE_SIZE):
+            if ancilla_x_errors.get(i):
+                x_errors.add(i + CODE_SIZE)
+            if ancilla_z_errors.get(i):
+                z_errors.add(i + CODE_SIZE)
+
+        for i in range(CODE_SIZE):
+            control = i + CODE_SIZE
+            target = i
+            place_physical_h(x_errors, z_errors, target, distribution)
+            place_physical_cnot(
+                x_errors, z_errors, control, target, distribution)
+            place_physical_h(x_errors, z_errors, target, distribution)
+
+        for i in range(1, CODE_SIZE):
+            place_physical_cnot(
+                x_errors, z_errors, i + CODE_SIZE, CODE_SIZE, distribution)
+
+        # Clear the ancilla errors.
+        for i in range(CODE_SIZE):
+            x_errors.clear(i + CODE_SIZE)
+            z_errors.clear(i + CODE_SIZE)
+
+        # If errors accumulate, treat them as logical errors.
+        move_logical_errors_to_circuit(x_errors, z_errors, circuit, q_index)
+
+        circuit.measure(q_index, c_index * MEASUREMENT_REPETITION + trial)
+
+
 def inject_errors_on_error_correction(
         correction: ErrorSet,
         x_errors: ErrorSet,
@@ -563,15 +697,10 @@ def inject_errors_on_error_correction(
             z_errors.add(e)
 
 
-# Returns `(has_x_logical_error, has_z_logical_error)` where
-#  - `has_x_logical_error` represents whether this error correction adds a
-#    logical X gate to the target qubit, and
-#  - `has_z_logical_error` represents whether this error correction adds a
-#    logical Z gate to the target qubit.
 def run_error_correction(
         x_errors: ErrorSet,
         z_errors: ErrorSet,
-        distribution: ErrorDistribution) -> Tuple[bool, bool]:
+        distribution: ErrorDistribution):
     # Try to correct errors.
     (x_correction, z_correction) = guess_errors(
         x_errors, z_errors, distribution)
@@ -583,38 +712,21 @@ def run_error_correction(
     inject_errors_on_error_correction(
         z_correction, x_errors, z_errors, distribution)
 
-    has_x_logical_error = False
-    has_z_logical_error = False
-    if calculate_deviation(x_errors) >= 2:
-        # There is no physical operation corresponding to this, so we
-        # don't need to think about errors.
-        x_errors += ErrorSet(range(code_size))
-        has_x_logical_error = True
-
-    if calculate_deviation(z_errors) >= 2:
-        # There is no physical operation corresponding to this, so we
-        # don't need to think about errors.
-        z_errors += ErrorSet(range(code_size))
-        has_z_logical_error = True
-    return (has_x_logical_error, has_z_logical_error)
-
 
 def simulate(circuit: qiskit.QuantumCircuit, distribution: ErrorDistribution):
     num_qubits = circuit.num_qubits
-    circuit_with_error = qiskit.QuantumCircuit(num_qubits)
+    circuit_with_error = qiskit.QuantumCircuit(
+        num_qubits, MEASUREMENT_REPETITION * circuit.num_clbits)
     x_errors: List[ErrorSet] = []
     z_errors: List[ErrorSet] = []
     for i in range(num_qubits):
         t = state_preparation_errors(distribution)
         x_errors.append(t[0])
-        z_errors.append(t[1])
-        (has_x_logical_error, has_z_logical_error) = \
-            run_error_correction(x_errors[i], z_errors[i], distribution)
-        # We can ignore logical Z errors, given we're preparaing a logical |0>.
-        if has_x_logical_error:
-            logging.info(
-                'State preparation on qubit {} failed.'.format(i))
-            circuit_with_error.x(i)
+        # We can ignore Z errors, given we're preparaing a logical |0>.
+        z_errors.append(ErrorSet())
+        run_error_correction(x_errors[i], z_errors[i], distribution)
+        move_logical_errors_to_circuit(
+            x_errors[i], z_errors[i], circuit_with_error, i)
 
     for gate in circuit.data:
         logging.info('operation name = {}'.format(gate.operation.name))
@@ -650,12 +762,11 @@ def simulate(circuit: qiskit.QuantumCircuit, distribution: ErrorDistribution):
             # Inject errors generated by the logical operation.
             inject_p1_errors(x_errors[index], z_errors[index], distribution)
 
-            (has_x_logical_error, has_logical_z_error) = run_error_correction(
+            run_error_correction(
                 x_errors[index], z_errors[index], distribution)
-            if has_x_logical_error:
-                circuit_with_error.x(index)
-            if has_z_logical_error:
-                circuit_with_error.z(index)
+            move_logical_errors_to_circuit(
+                x_errors[index], z_errors[index],
+                circuit_with_error, index)
         elif gate.operation.name == 'cx':
             # `gate` is a CNOT gate.
             control = circuit.qubits.index(gate.qubits[0])
@@ -675,18 +786,26 @@ def simulate(circuit: qiskit.QuantumCircuit, distribution: ErrorDistribution):
             # Inject errors generated by the logical operation.
             inject_p2_errors(x_errors, z_errors, control, target, distribution)
 
-            (has_x_logical_error, has_z_logical_error) = run_error_correction(
+            run_error_correction(
                 x_errors[control], z_errors[control], distribution)
-            if has_x_logical_error:
-                circuit_with_error.x(control)
-            if has_z_logical_error:
-                circuit_with_error.z(control)
-            (has_x_logical_error, has_logical_z_error) = run_error_correction(
+            move_logical_errors_to_circuit(
+                x_errors[control], z_errors[control],
+                circuit_with_error, control)
+            run_error_correction(
                 x_errors[target], z_errors[target], distribution)
-            if has_x_logical_error:
-                circuit_with_error.x(target)
-            if has_z_logical_error:
-                circuit_with_error.z(target)
+            move_logical_errors_to_circuit(
+                x_errors[target], z_errors[target],
+                circuit_with_error, target)
+        elif gate.operation.name == 'measure':
+            q_index = circuit.qubits.index(gate.qubits[0])
+            c_index = circuit.clbits.index(gate.clbits[0])
+            place_measurement(
+                x_errors[index],
+                z_errors[index],
+                circuit_with_error,
+                q_index,
+                c_index,
+                distribution)
         else:
             raise RuntimeError(
                 'Unsupported gate: {}'.format(gate.operation.name))
@@ -699,9 +818,8 @@ def run_state_preparation_and_count_errors(n, distribution: ErrorDistribution):
     count = 0
     for _ in range(n):
         (x_errors, z_errors) = state_preparation_errors(distribution)
-        (has_x_logical_error, has_logical_z_error) = run_error_correction(
-            x_errors, z_errors, distribution)
+        run_error_correction(x_errors, z_errors, distribution)
         # We can ignore logical Z errors, given we're preparaing a logical |0>.
-        if has_x_logical_error:
+        if calculate_deviation(x_errors) >= 2:
             count += 1
     return count
