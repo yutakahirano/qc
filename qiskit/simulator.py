@@ -1,8 +1,11 @@
 from typing import Iterable, List, Tuple
+import collections
 import logging
 import random
 
 import qiskit
+import qulacs
+import qulacs.gate
 
 
 class ErrorSet:
@@ -499,22 +502,22 @@ def inject_p2_errors_on_pysical_qubit(
 
 
 # If logical X errors and Z errors are contained in `x_errors` and `z_errors`,
-# then move them to `circuit`.
-def move_logical_errors_to_circuit(
+# then move them to `stae`.
+def move_logical_errors_to_state(
         x_errors: ErrorSet,
         z_errors: ErrorSet,
-        circuit: qiskit.QuantumCircuit,
+        state: qulacs.QuantumState,
         index: int):
     if calculate_deviation(x_errors) >= 2:
         # There is no physical operation corresponding to this, so we
         # don't need to think about errors.
         x_errors += ErrorSet(range(CODE_SIZE))
-        circuit.x(index)
+        qulacs.gate.X(index).update_quantum_state(state)
     if calculate_deviation(z_errors) >= 2:
         # There is no physical operation corresponding to this, so we
         # don't need to think about errors.
         z_errors += ErrorSet(range(CODE_SIZE))
-        circuit.z(index)
+        qulacs.gate.Z(index).update_quantum_state(state)
 
 
 def state_preparation_errors(
@@ -641,10 +644,11 @@ def prepare_cat_state(
 def place_measurement(
         x_errors: ErrorSet,
         z_errors: ErrorSet,
-        circuit: qiskit.QuantumCircuit,
+        state: qulacs.QuantumState,
         q_index: int,
         c_index: int,
         distribution: ErrorDistribution):
+    results = []
     for trial in range(MEASUREMENT_REPETITION):
         # Create a cat state.
         (ancilla_x_errors, ancilla_z_errors) = prepare_cat_state(distribution)
@@ -674,27 +678,16 @@ def place_measurement(
             z_errors.clear(i + CODE_SIZE)
 
         # If errors accumulate, treat them as logical errors.
-        move_logical_errors_to_circuit(x_errors, z_errors, circuit, q_index)
+        move_logical_errors_to_state(x_errors, z_errors, state, q_index)
 
-        circuit.measure(q_index, c_index * MEASUREMENT_REPETITION + trial)
+        qulacs.gate.Measurement(q_index, c_index).update_quantum_state(state)
+        result = state.get_classical_value(c_index)
 
-
-def inject_errors_on_error_correction(
-        correction: ErrorSet,
-        x_errors: ErrorSet,
-        z_errors: ErrorSet,
-        distribution: ErrorDistribution):
-    for e in correction:
-        if distribution.has_p1_error():
-            # X errors
-            x_errors.add(e)
-        if distribution.has_p1_error():
-            # Y errors
-            x_errors.add(e)
-            z_errors.add(e)
-        if distribution.has_p1_error():
-            # Z errors
-            z_errors.add(e)
+        if distribution.has_measurement_error():
+            result = 1 - result
+        results.append(result)
+    most_common = collections.Counter(results).most_common(1)[0][0]
+    state.set_classical_value(c_index, most_common)
 
 
 def run_error_correction(
@@ -707,16 +700,23 @@ def run_error_correction(
     x_errors += x_correction
     z_errors += z_correction
 
-    inject_errors_on_error_correction(
-        x_correction, x_errors, z_errors, distribution)
-    inject_errors_on_error_correction(
-        z_correction, x_errors, z_errors, distribution)
+    for correction in [x_correction, z_correction]:
+        for e in correction:
+            if distribution.has_p1_error():
+                # X errors
+                x_errors.add(e)
+            if distribution.has_p1_error():
+                # Y errors
+                x_errors.add(e)
+                z_errors.add(e)
+            if distribution.has_p1_error():
+                # Z errors
+                z_errors.add(e)
 
 
 def simulate(circuit: qiskit.QuantumCircuit, distribution: ErrorDistribution):
     num_qubits = circuit.num_qubits
-    circuit_with_error = qiskit.QuantumCircuit(
-        num_qubits, MEASUREMENT_REPETITION * circuit.num_clbits)
+    state = qulacs.QuantumState(num_qubits)
     x_errors: List[ErrorSet] = []
     z_errors: List[ErrorSet] = []
     for i in range(num_qubits):
@@ -725,8 +725,8 @@ def simulate(circuit: qiskit.QuantumCircuit, distribution: ErrorDistribution):
         # We can ignore Z errors, given we're preparaing a logical |0>.
         z_errors.append(ErrorSet())
         run_error_correction(x_errors[i], z_errors[i], distribution)
-        move_logical_errors_to_circuit(
-            x_errors[i], z_errors[i], circuit_with_error, i)
+        move_logical_errors_to_state(
+            x_errors[i], z_errors[i], state, i)
 
     for gate in circuit.data:
         logging.info('operation name = {}'.format(gate.operation.name))
@@ -736,7 +736,7 @@ def simulate(circuit: qiskit.QuantumCircuit, distribution: ErrorDistribution):
 
             if gate.operation.name == 'h':
                 # Run the logical operation.
-                circuit_with_error.h(index)
+                qulacs.gate.H(index).update_quantum_state(state)
 
                 # Update the error data.
                 # We swap X errors and Z errors, given HX = ZH and HZ = XH.
@@ -744,14 +744,14 @@ def simulate(circuit: qiskit.QuantumCircuit, distribution: ErrorDistribution):
                     (z_errors[index], x_errors[index])
             elif gate.operation.name == 's':
                 # Run the logical operation.
-                circuit_with_error.s(index)
+                qulacs.gate.S(index).update_quantum_state(state)
 
                 # Update the error data.
                 # ZS acts on each qubit, and ZSX = -YZS and (ZS)Z = Z(ZS).
                 z_errors[index] += x_errors[index]
             elif gate.operation.name == 'sdg':
                 # Run the logical operation.
-                circuit_with_error.sdg(index)
+                qulacs.gate.Sdag(index).update_quantum_state(state)
 
                 # Update the error data.
                 # This action is the inverse of the action for the S gate.
@@ -764,16 +764,16 @@ def simulate(circuit: qiskit.QuantumCircuit, distribution: ErrorDistribution):
 
             run_error_correction(
                 x_errors[index], z_errors[index], distribution)
-            move_logical_errors_to_circuit(
+            move_logical_errors_to_state(
                 x_errors[index], z_errors[index],
-                circuit_with_error, index)
+                state, index)
         elif gate.operation.name == 'cx':
             # `gate` is a CNOT gate.
             control = circuit.qubits.index(gate.qubits[0])
             target = circuit.qubits.index(gate.qubits[1])
 
             # Run the logical operation.
-            circuit_with_error.cnot(control, target)
+            qulacs.gate.CNOT(control, target).update_quantum_state(state)
 
             # Update the error data.
             # CX * X_CONTROL  = X_CONTROL * X_TARGET * CX
@@ -788,28 +788,26 @@ def simulate(circuit: qiskit.QuantumCircuit, distribution: ErrorDistribution):
 
             run_error_correction(
                 x_errors[control], z_errors[control], distribution)
-            move_logical_errors_to_circuit(
-                x_errors[control], z_errors[control],
-                circuit_with_error, control)
+            move_logical_errors_to_state(
+                x_errors[control], z_errors[control], state, control)
             run_error_correction(
                 x_errors[target], z_errors[target], distribution)
-            move_logical_errors_to_circuit(
-                x_errors[target], z_errors[target],
-                circuit_with_error, target)
+            move_logical_errors_to_state(
+                x_errors[target], z_errors[target], state, target)
         elif gate.operation.name == 'measure':
             q_index = circuit.qubits.index(gate.qubits[0])
             c_index = circuit.clbits.index(gate.clbits[0])
             place_measurement(
                 x_errors[index],
                 z_errors[index],
-                circuit_with_error,
+                state,
                 q_index,
                 c_index,
                 distribution)
         else:
             raise RuntimeError(
                 'Unsupported gate: {}'.format(gate.operation.name))
-    return circuit_with_error
+    return state
 
 
 # Runs state prepration `n` times, and returns the number of tries having

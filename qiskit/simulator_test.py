@@ -1,5 +1,6 @@
 import unittest
 import qiskit
+import qulacs
 
 from simulator import *
 
@@ -412,3 +413,40 @@ class TestMeasurement(unittest.TestCase):
                 continue
 
             self.assertTrue(false)
+
+
+class TestSimulation(unittest.TestCase):
+    def test_simulation(self):
+        # A smoke test checking that the simulation works when there are no
+        # errors.
+
+        circuit = qiskit.QuantumCircuit(4, 0)
+        circuit.sdg(0)
+        circuit.h(0)
+        circuit.h(1)
+        circuit.cnot(2, 1)
+        circuit.cnot(0, 2)
+        circuit.s(2)
+        circuit.s(2)
+        circuit.s(0)
+        circuit.sdg(1)
+        circuit.h(2)
+
+        distribution = ErrorDistribution(0, 0, 0, 0)
+        state = simulate(circuit, distribution)
+
+        state2 = qulacs.QuantumState(4)
+        qulacs.gate.Sdag(0).update_quantum_state(state2)
+        qulacs.gate.H(0).update_quantum_state(state2)
+        qulacs.gate.H(1).update_quantum_state(state2)
+        qulacs.gate.CNOT(2, 1).update_quantum_state(state2)
+        qulacs.gate.CNOT(0, 2).update_quantum_state(state2)
+        qulacs.gate.S(2).update_quantum_state(state2)
+        qulacs.gate.S(2).update_quantum_state(state2)
+        qulacs.gate.S(0).update_quantum_state(state2)
+        qulacs.gate.Sdag(1).update_quantum_state(state2)
+        qulacs.gate.H(2).update_quantum_state(state2)
+
+        difference = abs(state.get_vector() - state2.get_vector())
+        for e in difference:
+            self.assertLess(e, 1e-6)
