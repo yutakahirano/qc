@@ -408,7 +408,7 @@ class TestMeasurement(unittest.TestCase):
                 continue
 
             if len(set(x_errors)) > CODE_SIZE - 2:
-                # Swapping 0 and 1 for all qubits doesn't change the cat,
+                # Swapping 0 and 1 for all qubits doesn't change the cat state,
                 # so this is OK too.
                 continue
 
