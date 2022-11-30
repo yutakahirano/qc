@@ -60,7 +60,7 @@ class ErrorSet:
             set = set // 2
 
 
-CODE_SIZE = 7
+STEANE_CODE_SIZE = 7
 MEASUREMENT_REPETITION = 3
 
 
@@ -143,8 +143,8 @@ def run_x_stabilizer_measurement(
         with_flag: bool) -> Tuple[bool, bool]:
     assert len(pattern) == 4
     # Create two ancilla qubits.
-    a1 = CODE_SIZE
-    a2 = CODE_SIZE + 1
+    a1 = STEANE_CODE_SIZE
+    a2 = STEANE_CODE_SIZE + 1
 
     for j in [a1, a2]:
         if distribution.has_preparation_error():
@@ -199,8 +199,8 @@ def run_z_stabilizer_measurement(
         with_flag: bool) -> Tuple[bool, bool]:
     assert len(pattern) == 4
     # Create two ancilla qubits.
-    a1 = CODE_SIZE
-    a2 = CODE_SIZE + 1
+    a1 = STEANE_CODE_SIZE
+    a2 = STEANE_CODE_SIZE + 1
     for j in [a1, a2]:
         if distribution.has_preparation_error():
             # X error
@@ -345,7 +345,7 @@ def inject_p1_errors(
         x_errors: ErrorSet,
         z_errors: ErrorSet,
         distribution: ErrorDistribution):
-    for j in range(CODE_SIZE):
+    for j in range(STEANE_CODE_SIZE):
         if distribution.has_p1_error():
             # X errors
             x_errors.add(j)
@@ -364,7 +364,7 @@ def inject_p2_errors(
         control: int,
         target: int,
         distribution: ErrorDistribution):
-    for j in range(CODE_SIZE):
+    for j in range(STEANE_CODE_SIZE):
         if distribution.has_p2_error():
             # IX errors
             x_errors[target].add(j)
@@ -511,12 +511,12 @@ def move_logical_errors_to_state(
     if calculate_deviation(x_errors) >= 2:
         # There is no physical operation corresponding to this, so we
         # don't need to think about errors.
-        x_errors += ErrorSet(range(CODE_SIZE))
+        x_errors += ErrorSet(range(STEANE_CODE_SIZE))
         qulacs.gate.X(index).update_quantum_state(state)
     if calculate_deviation(z_errors) >= 2:
         # There is no physical operation corresponding to this, so we
         # don't need to think about errors.
-        z_errors += ErrorSet(range(CODE_SIZE))
+        z_errors += ErrorSet(range(STEANE_CODE_SIZE))
         qulacs.gate.Z(index).update_quantum_state(state)
 
 
@@ -527,7 +527,7 @@ def state_preparation_errors(
         x_errors = ErrorSet()
         z_errors = ErrorSet()
         # Inject errors on 1-qubit state preparation.
-        for j in range(CODE_SIZE):
+        for j in range(STEANE_CODE_SIZE):
             if distribution.has_preparation_error():
                 # X error
                 x_errors.add(j)
@@ -575,10 +575,10 @@ def verify_cat_state(
         x_errors: ErrorSet,
         z_errors: ErrorSet,
         distribution: ErrorDistribution) -> bool:
-    for i in range(0, CODE_SIZE):
-        for j in range(i + 1, CODE_SIZE):
+    for i in range(0, STEANE_CODE_SIZE):
+        for j in range(i + 1, STEANE_CODE_SIZE):
             # Define a 1-qubit ancilla and initialize it with |0>.
-            target = CODE_SIZE
+            target = STEANE_CODE_SIZE
             if distribution.has_preparation_error():
                 # X error
                 x_errors.add(target)
@@ -616,7 +616,7 @@ def prepare_cat_state(
         z_errors = ErrorSet()
 
         # Inject errors on 1-qubit state preparation.
-        for j in range(CODE_SIZE):
+        for j in range(STEANE_CODE_SIZE):
             if distribution.has_preparation_error():
                 # X error
                 x_errors.add(j)
@@ -632,7 +632,7 @@ def prepare_cat_state(
         place_physical_h(x_errors, z_errors, 0, distribution)
 
         # Add CNOTs to create the cat state.
-        for target in range(CODE_SIZE):
+        for target in range(STEANE_CODE_SIZE):
             place_physical_cnot(x_errors, z_errors, 0, target, distribution)
 
         if verify_cat_state(x_errors, z_errors, distribution):
@@ -654,28 +654,29 @@ def place_measurement(
         (ancilla_x_errors, ancilla_z_errors) = prepare_cat_state(distribution)
 
         # Copy the ancilla error information.
-        for i in range(CODE_SIZE):
+        for i in range(STEANE_CODE_SIZE):
             if ancilla_x_errors.get(i):
-                x_errors.add(i + CODE_SIZE)
+                x_errors.add(i + STEANE_CODE_SIZE)
             if ancilla_z_errors.get(i):
-                z_errors.add(i + CODE_SIZE)
+                z_errors.add(i + STEANE_CODE_SIZE)
 
-        for i in range(CODE_SIZE):
-            control = i + CODE_SIZE
+        for i in range(STEANE_CODE_SIZE):
+            control = i + STEANE_CODE_SIZE
             target = i
             place_physical_h(x_errors, z_errors, target, distribution)
             place_physical_cnot(
                 x_errors, z_errors, control, target, distribution)
             place_physical_h(x_errors, z_errors, target, distribution)
 
-        for i in range(1, CODE_SIZE):
+        for i in range(1, STEANE_CODE_SIZE):
             place_physical_cnot(
-                x_errors, z_errors, i + CODE_SIZE, CODE_SIZE, distribution)
+                x_errors, z_errors,
+                i + STEANE_CODE_SIZE, CODE_SIZE, distribution)
 
         # Clear the ancilla errors.
-        for i in range(CODE_SIZE):
-            x_errors.clear(i + CODE_SIZE)
-            z_errors.clear(i + CODE_SIZE)
+        for i in range(STEANE_CODE_SIZE):
+            x_errors.clear(i + STEANE_CODE_SIZE)
+            z_errors.clear(i + STEANE_CODE_SIZE)
 
         # If errors accumulate, treat them as logical errors.
         move_logical_errors_to_state(x_errors, z_errors, state, q_index)
