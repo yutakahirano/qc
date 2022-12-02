@@ -1,8 +1,37 @@
 import unittest
+import numpy as np
 import qiskit
 import qulacs
 
 from simulator import *
+
+
+no_error_distribution = ErrorDistribution(0, 0, 0, 0, 0)
+# Set this to False if the tests are too slow to run.
+test_magic_state_distillation = True
+
+
+def extract(state: qulacs.QuantumState):
+    return [
+        (i, v) for (i, v) in enumerate(state.get_vector()) if abs(v) > 1e-6]
+
+
+def is_close_up_to_global_phase(
+        s1: qulacs.QuantumState, s2: qulacs.QuantumState):
+    pattern1 = extract(s1)
+    pattern2 = extract(s2)
+
+    if len(pattern1) != len(pattern2):
+        return False
+
+    if len(pattern1) == 0:
+        return True
+
+    global_phase = pattern1[0][1] / pattern2[0][1]
+    s3 = s2.copy()
+    s3.multiply_coef(global_phase)
+
+    return np.linalg.norm(s3.get_vector() - s1.get_vector()) < 1e-6
 
 
 class CountErrorDistribution(ErrorDistribution):
@@ -194,7 +223,7 @@ class TestErrorGuessing(unittest.TestCase):
             distribution = CountErrorDistribution(i)
             x_errors = ErrorSet({})
             z_errors = ErrorSet({})
-            for j in range(CODE_SIZE):
+            for j in range(STEANE_CODE_SIZE):
                 if distribution.has_preparation_error():
                     # X error
                     x_errors.add(j)
@@ -299,7 +328,7 @@ class TestErrorGuessing(unittest.TestCase):
             distribution = CountErrorDistribution(i)
             x_errors = ErrorSet({})
             z_errors = ErrorSet({})
-            for j in range(CODE_SIZE):
+            for j in range(STEANE_CODE_SIZE):
                 if distribution.has_preparation_error():
                     # X error
                     x_errors.add(j)
@@ -350,7 +379,7 @@ class TestErrorGuessing(unittest.TestCase):
             distribution = CountErrorDistribution(i)
             x_errors = ErrorSet({})
             z_errors = ErrorSet({})
-            for j in range(CODE_SIZE):
+            for j in range(STEANE_CODE_SIZE):
                 if distribution.has_preparation_error():
                     # X error
                     x_errors.add(j)
@@ -386,6 +415,81 @@ class TestStatePreparation(unittest.TestCase):
             self.assertLess(calculate_deviation(x_errors), 2)
 
 
+class TestT(unittest.TestCase):
+    def test_magic_state_distillation_without_errors(self):
+        if not test_magic_state_distillation:
+            return
+        num_qubits = NUM_MS_DISTILLATION_ANCILLA_QUBITS
+        state = qulacs.QuantumState(num_qubits)
+        x_errors = [ErrorSet() for _ in range(num_qubits)]
+        z_errors = [ErrorSet() for _ in range(num_qubits)]
+        count = 0
+        while True:
+            result = magic_state_distillation(
+                x_errors, z_errors,
+                state, 0, 0, no_error_distribution)
+            if result:
+                break
+            count += 1
+            if count % 100 == 0:
+                print('count = {}'.format(count))
+        expected = qulacs.QuantumState(num_qubits)
+        qulacs.gate.H(num_qubits - 1).update_quantum_state(expected)
+        qulacs.gate.Tdag(num_qubits - 1).update_quantum_state(expected)
+        self.assertLess(
+            np.linalg.norm(state.get_vector() - expected.get_vector()), 1e-6)
+
+    def test_t_without_errors(self):
+        num_qubits = NUM_MS_DISTILLATION_ANCILLA_QUBITS + 3
+        state = qulacs.QuantumState(num_qubits)
+        x_errors = [ErrorSet() for _ in range(num_qubits)]
+        z_errors = [ErrorSet() for _ in range(num_qubits)]
+
+        qulacs.gate.H(0).update_quantum_state(state)
+        qulacs.gate.CNOT(0, 1).update_quantum_state(state)
+        qulacs.gate.CNOT(0, 2).update_quantum_state(state)
+        qulacs.gate.X(1).update_quantum_state(state)
+        qulacs.gate.Y(2).update_quantum_state(state)
+        place_logical_t(
+            x_errors, z_errors, state, 1, 3, 0, no_error_distribution,
+            simulate_magic_state_distillation=test_magic_state_distillation)
+
+        expected = qulacs.QuantumState(num_qubits)
+        qulacs.gate.H(0).update_quantum_state(expected)
+        qulacs.gate.CNOT(0, 1).update_quantum_state(expected)
+        qulacs.gate.CNOT(0, 2).update_quantum_state(expected)
+        qulacs.gate.X(1).update_quantum_state(expected)
+        qulacs.gate.Y(2).update_quantum_state(expected)
+        qulacs.gate.T(1).update_quantum_state(expected)
+
+        self.assertTrue(
+            is_close_up_to_global_phase(state, expected))
+
+    def test_t_twice_without_errors(self):
+        num_qubits = NUM_MS_DISTILLATION_ANCILLA_QUBITS + 1
+        state = qulacs.QuantumState(num_qubits)
+        x_errors = [ErrorSet() for _ in range(num_qubits)]
+        z_errors = [ErrorSet() for _ in range(num_qubits)]
+
+        qulacs.gate.X(0).update_quantum_state(state)
+        qulacs.gate.H(0).update_quantum_state(state)
+        place_logical_t(
+            x_errors, z_errors, state, 0, 1, 0, no_error_distribution,
+            simulate_magic_state_distillation=test_magic_state_distillation)
+        place_logical_t(
+            x_errors, z_errors, state, 0, 1, 0, no_error_distribution,
+            simulate_magic_state_distillation=test_magic_state_distillation)
+
+        expected = qulacs.QuantumState(num_qubits)
+        qulacs.gate.X(0).update_quantum_state(expected)
+        qulacs.gate.H(0).update_quantum_state(expected)
+        qulacs.gate.T(0).update_quantum_state(expected)
+        qulacs.gate.T(0).update_quantum_state(expected)
+
+        self.assertTrue(
+            is_close_up_to_global_phase(state, expected))
+
+
 class TestMeasurement(unittest.TestCase):
     def test_cat_state(self):
         saw_error = True
@@ -407,7 +511,7 @@ class TestMeasurement(unittest.TestCase):
                 # OK: Errors are found at most one qubit.
                 continue
 
-            if len(set(x_errors)) > CODE_SIZE - 2:
+            if len(set(x_errors)) > STEANE_CODE_SIZE - 2:
                 # Swapping 0 and 1 for all qubits doesn't change the cat state,
                 # so this is OK too.
                 continue
@@ -428,14 +532,16 @@ class TestSimulation(unittest.TestCase):
         circuit.cnot(0, 2)
         circuit.s(2)
         circuit.s(2)
+        circuit.t(2)
         circuit.s(0)
         circuit.sdg(1)
         circuit.h(2)
 
-        distribution = ErrorDistribution(0, 0, 0, 0)
-        state = simulate(circuit, distribution)
+        state = simulate(
+            circuit, no_error_distribution,
+            simulate_magic_state_distillation=test_magic_state_distillation)
 
-        state2 = qulacs.QuantumState(4)
+        state2 = qulacs.QuantumState(4 + NUM_MS_DISTILLATION_ANCILLA_QUBITS)
         qulacs.gate.Sdag(0).update_quantum_state(state2)
         qulacs.gate.H(0).update_quantum_state(state2)
         qulacs.gate.H(1).update_quantum_state(state2)
@@ -443,10 +549,10 @@ class TestSimulation(unittest.TestCase):
         qulacs.gate.CNOT(0, 2).update_quantum_state(state2)
         qulacs.gate.S(2).update_quantum_state(state2)
         qulacs.gate.S(2).update_quantum_state(state2)
+        qulacs.gate.T(2).update_quantum_state(state2)
         qulacs.gate.S(0).update_quantum_state(state2)
         qulacs.gate.Sdag(1).update_quantum_state(state2)
         qulacs.gate.H(2).update_quantum_state(state2)
 
-        difference = abs(state.get_vector() - state2.get_vector())
-        for e in difference:
-            self.assertLess(e, 1e-6)
+        self.assertLess(
+            np.linalg.norm(state.get_vector() - state2.get_vector()), 1e-6)
