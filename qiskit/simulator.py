@@ -1046,6 +1046,61 @@ def place_logical_t(
         distribution)
 
 
+# Places a logical Tdg operation.
+def place_logical_tdg(
+        x_errors: List[ErrorSet],
+        z_errors: List[ErrorSet],
+        state: qulacs.QuantumState,
+        index: int,
+        magic_state_ancilla_index: int,
+        cl_index: int,
+        distribution: ErrorDistribution,
+        simulate_magic_state_distillation=True):
+    if simulate_magic_state_distillation:
+        magic_state_distillation(
+            x_errors, z_errors,
+            state, magic_state_ancilla_index, cl_index, distribution)
+    else:
+        fast_magic_state_distillation(
+            x_errors, z_errors,
+            state, magic_state_ancilla_index, cl_index, distribution)
+    magic_state_index = \
+        magic_state_ancilla_index + NUM_MS_DISTILLATION_ANCILLA_QUBITS - 1
+    # We have a magic state at `magic_state_index`!
+    place_logical_cnot(
+        x_errors, z_errors, state, magic_state_index, index, distribution)
+
+    place_measurement(
+        x_errors[index], z_errors[index], state, index, cl_index, distribution)
+    if state.get_classical_value(cl_index) == 1:
+        place_logical_h(
+            x_errors, z_errors, state, magic_state_index, distribution)
+        place_logical_s(
+            x_errors, z_errors, state, magic_state_index, distribution)
+        place_logical_s(
+            x_errors, z_errors, state, magic_state_index, distribution)
+        place_logical_h(
+            x_errors, z_errors, state, magic_state_index, distribution)
+        place_logical_sdg(
+            x_errors, z_errors, state, magic_state_index, distribution)
+
+    # Swap the qubits.
+    place_logical_cnot(
+        x_errors, z_errors, state, magic_state_index, index, distribution)
+    place_logical_cnot(
+        x_errors, z_errors, state, index, magic_state_index, distribution)
+    place_logical_cnot(
+        x_errors, z_errors, state, magic_state_index, index, distribution)
+
+    reset_logical_qubits(
+        x_errors, z_errors,
+        state,
+        range(magic_state_ancilla_index,
+              magic_state_ancilla_index + NUM_MS_DISTILLATION_ANCILLA_QUBITS),
+        cl_index,
+        distribution)
+
+
 def simulate(
         circuit: qiskit.QuantumCircuit, distribution: ErrorDistribution,
         simulate_magic_state_distillation: bool = True):
@@ -1074,6 +1129,12 @@ def simulate(
         elif gate.operation.name == 't':
             index = circuit.qubits.index(gate.qubits[0])
             place_logical_t(
+                x_errors, z_errors,
+                state, index, magic_state_ancilla_index, utility_cl_index,
+                distribution, simulate_magic_state_distillation)
+        elif gate.operation.name == 'tdg':
+            index = circuit.qubits.index(gate.qubits[0])
+            place_logical_tdg(
                 x_errors, z_errors,
                 state, index, magic_state_ancilla_index, utility_cl_index,
                 distribution, simulate_magic_state_distillation)

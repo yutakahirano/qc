@@ -489,6 +489,32 @@ class TestT(unittest.TestCase):
         self.assertTrue(
             is_close_up_to_global_phase(state, expected))
 
+    def test_tdg_without_errors(self):
+        num_qubits = NUM_MS_DISTILLATION_ANCILLA_QUBITS + 3
+        state = qulacs.QuantumState(num_qubits)
+        x_errors = [ErrorSet() for _ in range(num_qubits)]
+        z_errors = [ErrorSet() for _ in range(num_qubits)]
+
+        qulacs.gate.H(0).update_quantum_state(state)
+        qulacs.gate.CNOT(0, 1).update_quantum_state(state)
+        qulacs.gate.CNOT(0, 2).update_quantum_state(state)
+        qulacs.gate.X(1).update_quantum_state(state)
+        qulacs.gate.Y(2).update_quantum_state(state)
+        place_logical_tdg(
+            x_errors, z_errors, state, 1, 3, 0, no_error_distribution,
+            simulate_magic_state_distillation=test_magic_state_distillation)
+
+        expected = qulacs.QuantumState(num_qubits)
+        qulacs.gate.H(0).update_quantum_state(expected)
+        qulacs.gate.CNOT(0, 1).update_quantum_state(expected)
+        qulacs.gate.CNOT(0, 2).update_quantum_state(expected)
+        qulacs.gate.X(1).update_quantum_state(expected)
+        qulacs.gate.Y(2).update_quantum_state(expected)
+        qulacs.gate.Tdag(1).update_quantum_state(expected)
+
+        self.assertTrue(
+            is_close_up_to_global_phase(state, expected))
+
 
 class TestMeasurement(unittest.TestCase):
     def test_cat_state(self):
@@ -534,6 +560,7 @@ class TestSimulation(unittest.TestCase):
         circuit.s(2)
         circuit.t(2)
         circuit.s(0)
+        circuit.tdg(0)
         circuit.sdg(1)
         circuit.h(2)
 
@@ -551,8 +578,9 @@ class TestSimulation(unittest.TestCase):
         qulacs.gate.S(2).update_quantum_state(state2)
         qulacs.gate.T(2).update_quantum_state(state2)
         qulacs.gate.S(0).update_quantum_state(state2)
+        qulacs.gate.Tdag(0).update_quantum_state(state2)
         qulacs.gate.Sdag(1).update_quantum_state(state2)
         qulacs.gate.H(2).update_quantum_state(state2)
 
-        self.assertLess(
-            np.linalg.norm(state.get_vector() - state2.get_vector()), 1e-6)
+        self.assertTrue(
+            is_close_up_to_global_phase(state, state2))
