@@ -1,11 +1,15 @@
-from typing import Iterable, List, Tuple
+from typing import Any, Iterable, List, Tuple
+import cmath
 import collections
 import logging
 import random
+import time
 
+import numpy as np
 import qiskit
 import qulacs
 import qulacs.gate
+import qulacs.state
 
 
 class ErrorSet:
@@ -722,6 +726,318 @@ def run_error_correction(
                 z_errors.add(e)
 
 
+# See 2.8.2 in https://arxiv.org/abs/1504.01444.
+class MagicStateDistillator:
+    # A cache to speed up magic state distillation. A Cache instance is
+    # expected to be shared by multiple MagicStateDistillator instances.
+    class Cache:
+        def __init__(self):
+            self.state = qulacs.QuantumState(
+                NUM_MS_DISTILLATION_ANCILLA_QUBITS)
+            self.has_value = False
+
+    def __init__(self, cache: Cache, distribution: ErrorDistribution):
+        self.x_errors: List[ErrorSet] = [
+            ErrorSet() for _ in range(NUM_MS_DISTILLATION_ANCILLA_QUBITS)
+        ]
+        self.z_errors: List[ErrorSet] = [
+            ErrorSet() for _ in range(NUM_MS_DISTILLATION_ANCILLA_QUBITS)
+        ]
+        self.logical_x_errors = ErrorSet()
+        self.logical_z_errors = ErrorSet()
+        self.logical_sx_errors = ErrorSet()
+        self.cache = cache
+        self.distribution = distribution
+
+    # Runs the magic state distillation.
+    # Generates a magic state (Tdag(H(|0>))) and resurns an gate that returns
+    # the magic state when |0> is given (at the given qubit).
+    #
+    # This is the only public method (except for the constructor) in this
+    # class.
+    def run(self, index: int):
+        count = 0
+        distribution = self.distribution
+
+        # Durations to measure perforamnce.
+        d1 = 0.0
+        d2 = 0.0
+        d3 = 0.0
+        d4 = 0.0
+        d5 = 0.0
+        last_time = time.time()
+        while True:
+            count += 1
+            if count % 100 == 0:
+                logging.info(
+                    'magic state distribution: count = {}, duration = {}'
+                    .format(count, time.time() - last_time))
+                s = d1 + d2 + d3 + d4 + d5
+                logging.info('relative cost: {}, {}, {}, {}, {}'.format(
+                    d1 / s, d2 / s, d3 / s, d4 / s, d5 / s))
+                d1 = 0.0
+                d2 = 0.0
+                d3 = 0.0
+                d4 = 0.0
+                d5 = 0.0
+
+                last_time = time.time()
+            t1 = time.time()
+            self.reset_logical_qubits()
+
+            self.place_h(0)
+            self.place_h(1)
+            self.place_h(3)
+            self.place_h(7)
+            self.place_h(14)
+
+            self.place_cnot(14, 15)
+
+            self.place_cnot(0, 5)
+            self.place_cnot(0, 6)
+            self.place_cnot(0, 9)
+            self.place_cnot(0, 10)
+            self.place_cnot(0, 11)
+            self.place_cnot(0, 12)
+            self.place_cnot(0, 14)
+
+            self.place_cnot(1, 4)
+            self.place_cnot(1, 6)
+            self.place_cnot(1, 8)
+            self.place_cnot(1, 10)
+            self.place_cnot(1, 11)
+            self.place_cnot(1, 13)
+            self.place_cnot(1, 14)
+
+            self.place_cnot(3, 2)
+            self.place_cnot(3, 6)
+            self.place_cnot(3, 8)
+            self.place_cnot(3, 9)
+            self.place_cnot(3, 12)
+            self.place_cnot(3, 13)
+            self.place_cnot(3, 14)
+
+            self.place_cnot(7, 2)
+            self.place_cnot(7, 4)
+            self.place_cnot(7, 5)
+            self.place_cnot(7, 10)
+            self.place_cnot(7, 12)
+            self.place_cnot(7, 13)
+            self.place_cnot(7, 14)
+
+            self.place_cnot(14, 2)
+            self.place_cnot(14, 4)
+            self.place_cnot(14, 5)
+            self.place_cnot(14, 8)
+            self.place_cnot(14, 9)
+            self.place_cnot(14, 11)
+
+            for i in range(15):
+                self.place_t_but_error_correction(i)
+
+            d1 += time.time() - t1
+            t1 = time.time()
+
+            if not self.cache.has_value:
+                self.cache.has_value = True
+
+            state = self.cache.state.copy()
+
+            d2 += time.time() - t1
+            t1 = time.time()
+
+            # Let's add back logical errors if there are any...
+            for i in range(NUM_MS_DISTILLATION_ANCILLA_QUBITS):
+                assert not self.logical_x_errors.get(i)
+                if self.logical_sx_errors.get(i):
+                    qulacs.gate.X(i).update_quantum_state(state)
+                    qulacs.gate.S(i).update_quantum_state(state)
+                    self.logical_sx_errors.add(i)
+                if self.logical_z_errors.get(i):
+                    qulacs.gate.Z(i).update_quantum_state(state)
+                    self.logical_z_errors.add(i)
+
+            d3 += time.time() - t1
+            t1 = time.time()
+            for i in range(15):
+                # Correct errors caused by the T operations above.
+                run_error_correction(
+                    self.x_errors[i], self.z_errors[i], distribution)
+                move_logical_errors_to_state(
+                    self.x_errors[i], self.z_errors[i], state, i)
+
+                self.place_h_after_t(state, i)
+
+            d4 += time.time() - t1
+            t1 = time.time()
+            measurement_durations = []
+            has_measurement_error = False
+            for i in range(15):
+                cl_index = 0
+                place_measurement(
+                    self.x_errors[i], self.z_errors[i],
+                    state, i, cl_index, self.distribution)
+                if state.get_classical_value(cl_index) != 0:
+                    has_measurement_error = True
+                    break
+            measurement_durations.append(time.time() - t1)
+            if not has_measurement_error:
+                # As we've measured all the other qubits, this density matrix
+                # is pure.
+                dm = qulacs.state.partial_trace(state, list(range(15)))
+                assert abs(dm.get_matrix()[0][0].imag) < 1e-6
+                assert abs(dm.get_matrix()[1][1].imag) < 1e-6
+                a = cmath.sqrt(dm.get_matrix()[0][0])
+                b = dm.get_matrix()[1][0] / a
+                vector = state.get_vector()
+                gate_data: np.ndarray[np.complex128, Any] = np.ndarray(
+                    shape=(2, 2), dtype=np.complex128)
+                gate_data[0][0] = a
+                gate_data[0][1] = -b.conjugate()
+                gate_data[1][0] = b
+                gate_data[1][1] = a.conjugate()
+                return qulacs.gate.DenseMatrix(index, gate_data)
+            d5 += time.time() - t1
+            t1 = time.time()
+
+    def reset_logical_qubits(self):
+        num_qubits = NUM_MS_DISTILLATION_ANCILLA_QUBITS
+        self.x_errors = [ErrorSet() for _ in range(num_qubits)]
+        self.z_errors = [ErrorSet() for _ in range(num_qubits)]
+        self.logical_x_errors = ErrorSet()
+        self.logical_z_errors = ErrorSet()
+        self.logical_sx_errors = ErrorSet()
+        for index in range(num_qubits):
+            t = state_preparation_errors(self.distribution)
+            self.x_errors[index] += t[0]
+            # We can ignore Z errors, given we're preparaing a logical |0>.
+
+            run_error_correction(
+                self.x_errors[index], self.z_errors[index], self.distribution)
+            self.move_logical_errors(index)
+
+    def place_h(self, index: int):
+        x_errors = self.x_errors
+        z_errors = self.z_errors
+        distribution = self.distribution
+
+        (x_errors[index], z_errors[index]) = (z_errors[index], x_errors[index])
+        logical_x_error = self.logical_x_errors.get(index)
+        logical_z_error = self.logical_z_errors.get(index)
+        if logical_x_error:
+            self.logical_z_errors.add(index)
+        if logical_z_error:
+            self.logical_x_errors.add(index)
+
+        if not self.cache.has_value:
+            qulacs.gate.H(index).update_quantum_state(self.cache.state)
+
+        inject_p1_errors(x_errors[index], z_errors[index], distribution)
+        run_error_correction(x_errors[index], z_errors[index], distribution)
+        self.move_logical_errors(index)
+
+    def place_cnot(self, control: int, target: int):
+        t1 = time.time()
+        x_errors = self.x_errors
+        z_errors = self.z_errors
+        distribution = self.distribution
+
+        x_errors[target] += x_errors[control]
+        z_errors[control] += z_errors[target]
+        if self.logical_x_errors.get(control):
+            self.logical_x_errors.add(target)
+        if self.logical_z_errors.get(target):
+            self.logical_z_errors.add(control)
+
+        if not self.cache.has_value:
+            qulacs.gate.CNOT(control, target).update_quantum_state(
+                self.cache.state)
+
+        inject_p2_errors(x_errors, z_errors, control, target, distribution)
+
+        run_error_correction(
+            x_errors[control], z_errors[control], distribution)
+        self.move_logical_errors(control)
+        run_error_correction(x_errors[target], z_errors[target], distribution)
+        self.move_logical_errors(target)
+
+    def place_t_but_error_correction(self, index: int):
+        x_errors = self.x_errors
+        z_errors = self.z_errors
+        distribution = self.distribution
+
+        # We cannot simulate T actions on physical X errors and Z errors. Let's
+        # assume leving it would bring us good approximation...
+
+        # TX = SXT up to a global phase.
+        if self.logical_x_errors.get(index):
+            # Clear the X error.
+            self.logical_x_errors.add(index)
+            self.logical_sx_errors.add(index)
+        # T and Z commute.
+
+        if not self.cache.has_value:
+            qulacs.gate.T(index).update_quantum_state(self.cache.state)
+
+        for i in range(STEANE_CODE_SIZE):
+            if distribution.has_unreliable_t_error():
+                # X errors
+                x_errors[index].add(i)
+            if distribution.has_unreliable_t_error():
+                # Y errors
+                x_errors[index].add(i)
+                z_errors[index].add(i)
+            if distribution.has_unreliable_t_error():
+                # Z errors
+                z_errors[index].add(i)
+
+    def place_h_after_t(self, state: qulacs.QuantumState, index: int):
+        x_errors = self.x_errors
+        z_errors = self.z_errors
+        distribution = self.distribution
+
+        (x_errors[index], z_errors[index]) = (z_errors[index], x_errors[index])
+
+        # We stopped tracking logical errors and instead applying logical
+        # errors immediately.
+        assert self.logical_x_errors.get(index) == 0
+        assert self.logical_z_errors.get(index) == 0
+
+        qulacs.gate.H(index).update_quantum_state(state)
+
+        for i in range(STEANE_CODE_SIZE):
+            if distribution.has_unreliable_t_error():
+                # X errors
+                x_errors[index].add(i)
+            if distribution.has_unreliable_t_error():
+                # Y errors
+                x_errors[index].add(i)
+                z_errors[index].add(i)
+            if distribution.has_unreliable_t_error():
+                # Z errors
+                z_errors[index].add(i)
+
+        inject_p1_errors(x_errors[index], z_errors[index], distribution)
+        run_error_correction(x_errors[index], z_errors[index], distribution)
+        move_logical_errors_to_state(
+            x_errors[index], z_errors[index], state, index)
+
+    def move_logical_errors(self, index: int):
+        x_errors = self.x_errors[index]
+        z_errors = self.z_errors[index]
+
+        if calculate_deviation(x_errors) >= 2:
+            # There is no physical operation corresponding to this, so we
+            # don't need to think about errors.
+            x_errors += ErrorSet(range(STEANE_CODE_SIZE))
+            self.logical_x_errors.add(index)
+        if calculate_deviation(z_errors) >= 2:
+            # There is no physical operation corresponding to this, so we
+            # don't need to think about errors.
+            z_errors += ErrorSet(range(STEANE_CODE_SIZE))
+            self.logical_z_errors.add(index)
+
+
 # Places a logical H operation.
 def place_logical_h(
         x_errors: List[ErrorSet],
@@ -810,31 +1126,6 @@ def place_logical_cnot(
         x_errors[target], z_errors[target], state, target)
 
 
-def place_unreliable_t(
-        x_errors: List[ErrorSet],
-        z_errors: List[ErrorSet],
-        state: qulacs.QuantumState,
-        index: int,
-        distribution: ErrorDistribution):
-    qulacs.gate.T(index).update_quantum_state(state)
-
-    for i in range(STEANE_CODE_SIZE):
-        if distribution.has_unreliable_t_error():
-            # X errors
-            x_errors[index].add(i)
-        if distribution.has_unreliable_t_error():
-            # Y errors
-            x_errors[index].add(i)
-            z_errors[index].add(i)
-        if distribution.has_unreliable_t_error():
-            # Z errors
-            z_errors[index].add(i)
-
-    run_error_correction(x_errors[index], z_errors[index], distribution)
-    move_logical_errors_to_state(
-        x_errors[index], z_errors[index], state, index)
-
-
 # Resets given qubits in the given QuantumState.
 def reset_logical_qubits(
         x_errors: List[ErrorSet],
@@ -859,121 +1150,6 @@ def reset_logical_qubits(
             x_errors[index], z_errors[index], state, index)
 
 
-# See 2.8.2 in https://arxiv.org/abs/1504.01444.
-def magic_state_distillation(
-        x_errors: List[ErrorSet],
-        z_errors: List[ErrorSet],
-        state: qulacs.QuantumState,
-        index: int,
-        cl_index: int,
-        distribution: ErrorDistribution):
-    count = 0
-    while True:
-        count += 1
-        if count % 100 == 0:
-            logging.info('magic state distillation: count = {}'.format(count))
-        # Clear ancilla qubits to |0>.
-        reset_logical_qubits(
-            x_errors, z_errors,
-            state,
-            range(index, index + NUM_MS_DISTILLATION_ANCILLA_QUBITS), cl_index,
-            distribution)
-
-        place_logical_h(x_errors, z_errors, state, index, distribution)
-        place_logical_h(x_errors, z_errors, state, index + 1, distribution)
-        place_logical_h(x_errors, z_errors, state, index + 3, distribution)
-        place_logical_h(x_errors, z_errors, state, index + 7, distribution)
-        place_logical_h(x_errors, z_errors, state, index + 14, distribution)
-
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 14, index + 15, distribution)
-
-        place_logical_cnot(
-            x_errors, z_errors, state, index, index + 5, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index, index + 6, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index, index + 9, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index, index + 10, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index, index + 11, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index, index + 12, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index, index + 14, distribution)
-
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 1, index + 4, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 1, index + 6, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 1, index + 8, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 1, index + 10, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 1, index + 11, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 1, index + 13, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 1, index + 14, distribution)
-
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 3, index + 2, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 3, index + 6, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 3, index + 8, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 3, index + 9, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 3, index + 12, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 3, index + 13, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 3, index + 14, distribution)
-
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 7, index + 2, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 7, index + 4, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 7, index + 5, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 7, index + 10, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 7, index + 12, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 7, index + 13, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 7, index + 14, distribution)
-
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 14, index + 2, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 14, index + 4, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 14, index + 5, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 14, index + 8, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 14, index + 9, distribution)
-        place_logical_cnot(
-            x_errors, z_errors, state, index + 14, index + 11, distribution)
-
-        has_measurement_error = False
-        for i in range(index, index + 15):
-            place_unreliable_t(x_errors, z_errors, state, i, distribution)
-            place_logical_h(x_errors, z_errors, state, i, distribution)
-            place_measurement(
-                x_errors[i], z_errors[i], state, i, cl_index, distribution)
-            if state.get_classical_value(cl_index) != 0:
-                has_measurement_error = True
-                break
-        if not has_measurement_error:
-            return
-
-
 # Prepares a magic state distillation, without simulating errors.
 def fast_magic_state_distillation(
         x_errors: List[ErrorSet],
@@ -996,20 +1172,23 @@ def place_logical_t(
         z_errors: List[ErrorSet],
         state: qulacs.QuantumState,
         index: int,
-        magic_state_ancilla_index: int,
+        magic_state_index: int,
         cl_index: int,
+        magic_state_distillation_cache: MagicStateDistillator.Cache,
         distribution: ErrorDistribution,
         simulate_magic_state_distillation=True):
     if simulate_magic_state_distillation:
-        magic_state_distillation(
+        reset_logical_qubits(
             x_errors, z_errors,
-            state, magic_state_ancilla_index, cl_index, distribution)
+            state, [magic_state_index], cl_index, distribution)
+        gate = MagicStateDistillator(
+            magic_state_distillation_cache,
+            distribution).run(magic_state_index)
+        gate.update_quantum_state(state)
     else:
         fast_magic_state_distillation(
             x_errors, z_errors,
-            state, magic_state_ancilla_index, cl_index, distribution)
-    magic_state_index = \
-        magic_state_ancilla_index + NUM_MS_DISTILLATION_ANCILLA_QUBITS - 1
+            state, magic_state_index, cl_index, distribution)
     # We have a magic state at `magic_state_index`!
     place_logical_s(x_errors, z_errors, state, magic_state_index, distribution)
     place_logical_cnot(
@@ -1038,12 +1217,7 @@ def place_logical_t(
         x_errors, z_errors, state, magic_state_index, index, distribution)
 
     reset_logical_qubits(
-        x_errors, z_errors,
-        state,
-        range(magic_state_ancilla_index,
-              magic_state_ancilla_index + NUM_MS_DISTILLATION_ANCILLA_QUBITS),
-        cl_index,
-        distribution)
+        x_errors, z_errors, state, [magic_state_index], cl_index, distribution)
 
 
 # Places a logical Tdg operation.
@@ -1052,20 +1226,23 @@ def place_logical_tdg(
         z_errors: List[ErrorSet],
         state: qulacs.QuantumState,
         index: int,
-        magic_state_ancilla_index: int,
+        magic_state_index: int,
         cl_index: int,
+        magic_state_distillation_cache: MagicStateDistillator.Cache,
         distribution: ErrorDistribution,
         simulate_magic_state_distillation=True):
     if simulate_magic_state_distillation:
-        magic_state_distillation(
+        reset_logical_qubits(
             x_errors, z_errors,
-            state, magic_state_ancilla_index, cl_index, distribution)
+            state, [magic_state_index], cl_index, distribution)
+        gate = MagicStateDistillator(
+            magic_state_distillation_cache,
+            distribution).run(magic_state_index)
+        gate.update_quantum_state(state)
     else:
         fast_magic_state_distillation(
             x_errors, z_errors,
-            state, magic_state_ancilla_index, cl_index, distribution)
-    magic_state_index = \
-        magic_state_ancilla_index + NUM_MS_DISTILLATION_ANCILLA_QUBITS - 1
+            state, magic_state_index, cl_index, distribution)
     # We have a magic state at `magic_state_index`!
     place_logical_cnot(
         x_errors, z_errors, state, magic_state_index, index, distribution)
@@ -1093,23 +1270,20 @@ def place_logical_tdg(
         x_errors, z_errors, state, magic_state_index, index, distribution)
 
     reset_logical_qubits(
-        x_errors, z_errors,
-        state,
-        range(magic_state_ancilla_index,
-              magic_state_ancilla_index + NUM_MS_DISTILLATION_ANCILLA_QUBITS),
-        cl_index,
-        distribution)
+        x_errors, z_errors, state, [magic_state_index], cl_index, distribution)
 
 
 def simulate(
         circuit: qiskit.QuantumCircuit, distribution: ErrorDistribution,
         simulate_magic_state_distillation: bool = True):
-    num_qubits = circuit.num_qubits + NUM_MS_DISTILLATION_ANCILLA_QUBITS
+    num_qubits = circuit.num_qubits + 1
     magic_state_ancilla_index = circuit.num_qubits
     utility_cl_index = circuit.num_clbits
     state = qulacs.QuantumState(num_qubits)
     x_errors: List[ErrorSet] = [ErrorSet() for _ in range(num_qubits)]
     z_errors: List[ErrorSet] = [ErrorSet() for _ in range(num_qubits)]
+
+    magic_state_distillation_cache = MagicStateDistillator.Cache()
 
     reset_logical_qubits(
         x_errors, z_errors,
@@ -1131,12 +1305,14 @@ def simulate(
             place_logical_t(
                 x_errors, z_errors,
                 state, index, magic_state_ancilla_index, utility_cl_index,
+                magic_state_distillation_cache,
                 distribution, simulate_magic_state_distillation)
         elif gate.operation.name == 'tdg':
             index = circuit.qubits.index(gate.qubits[0])
             place_logical_tdg(
                 x_errors, z_errors,
                 state, index, magic_state_ancilla_index, utility_cl_index,
+                magic_state_distillation_cache,
                 distribution, simulate_magic_state_distillation)
         elif gate.operation.name == 'cx':
             control = circuit.qubits.index(gate.qubits[0])

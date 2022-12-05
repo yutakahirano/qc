@@ -417,6 +417,7 @@ class TestStatePreparation(unittest.TestCase):
 
 class TestT(unittest.TestCase):
     def test_magic_state_distillation_without_errors(self):
+        return
         if not test_magic_state_distillation:
             return
         num_qubits = NUM_MS_DISTILLATION_ANCILLA_QUBITS
@@ -439,8 +440,23 @@ class TestT(unittest.TestCase):
         self.assertLess(
             np.linalg.norm(state.get_vector() - expected.get_vector()), 1e-6)
 
+    def test_magic_state_distillation_without_errors(self):
+        if not test_magic_state_distillation:
+            return
+        cache = MagicStateDistillator.Cache()
+        gate = MagicStateDistillator(cache, no_error_distribution).run(0)
+        state = qulacs.QuantumState(1)
+        gate.update_quantum_state(state)
+
+        expected = qulacs.QuantumState(1)
+        qulacs.gate.H(0).update_quantum_state(expected)
+        qulacs.gate.Tdag(0).update_quantum_state(expected)
+
+        self.assertTrue(is_close_up_to_global_phase(state, expected))
+
+ 
     def test_t_without_errors(self):
-        num_qubits = NUM_MS_DISTILLATION_ANCILLA_QUBITS + 3
+        num_qubits = 4
         state = qulacs.QuantumState(num_qubits)
         x_errors = [ErrorSet() for _ in range(num_qubits)]
         z_errors = [ErrorSet() for _ in range(num_qubits)]
@@ -451,7 +467,8 @@ class TestT(unittest.TestCase):
         qulacs.gate.X(1).update_quantum_state(state)
         qulacs.gate.Y(2).update_quantum_state(state)
         place_logical_t(
-            x_errors, z_errors, state, 1, 3, 0, no_error_distribution,
+            x_errors, z_errors, state, 1, 3, 0, MagicStateDistillator.Cache(),
+            no_error_distribution,
             simulate_magic_state_distillation=test_magic_state_distillation)
 
         expected = qulacs.QuantumState(num_qubits)
@@ -466,18 +483,19 @@ class TestT(unittest.TestCase):
             is_close_up_to_global_phase(state, expected))
 
     def test_t_twice_without_errors(self):
-        num_qubits = NUM_MS_DISTILLATION_ANCILLA_QUBITS + 1
+        num_qubits = 2
         state = qulacs.QuantumState(num_qubits)
+        cache = MagicStateDistillator.Cache()
         x_errors = [ErrorSet() for _ in range(num_qubits)]
         z_errors = [ErrorSet() for _ in range(num_qubits)]
 
         qulacs.gate.X(0).update_quantum_state(state)
         qulacs.gate.H(0).update_quantum_state(state)
         place_logical_t(
-            x_errors, z_errors, state, 0, 1, 0, no_error_distribution,
+            x_errors, z_errors, state, 0, 1, 0, cache, no_error_distribution,
             simulate_magic_state_distillation=test_magic_state_distillation)
         place_logical_t(
-            x_errors, z_errors, state, 0, 1, 0, no_error_distribution,
+            x_errors, z_errors, state, 0, 1, 0, cache, no_error_distribution,
             simulate_magic_state_distillation=test_magic_state_distillation)
 
         expected = qulacs.QuantumState(num_qubits)
@@ -490,8 +508,9 @@ class TestT(unittest.TestCase):
             is_close_up_to_global_phase(state, expected))
 
     def test_tdg_without_errors(self):
-        num_qubits = NUM_MS_DISTILLATION_ANCILLA_QUBITS + 3
+        num_qubits = 4
         state = qulacs.QuantumState(num_qubits)
+        cache = MagicStateDistillator.Cache()
         x_errors = [ErrorSet() for _ in range(num_qubits)]
         z_errors = [ErrorSet() for _ in range(num_qubits)]
 
@@ -501,7 +520,7 @@ class TestT(unittest.TestCase):
         qulacs.gate.X(1).update_quantum_state(state)
         qulacs.gate.Y(2).update_quantum_state(state)
         place_logical_tdg(
-            x_errors, z_errors, state, 1, 3, 0, no_error_distribution,
+            x_errors, z_errors, state, 1, 3, 0, cache, no_error_distribution,
             simulate_magic_state_distillation=test_magic_state_distillation)
 
         expected = qulacs.QuantumState(num_qubits)
@@ -549,7 +568,6 @@ class TestSimulation(unittest.TestCase):
     def test_simulation(self):
         # A smoke test checking that the simulation works when there are no
         # errors.
-
         circuit = qiskit.QuantumCircuit(4, 0)
         circuit.sdg(0)
         circuit.h(0)
@@ -564,11 +582,12 @@ class TestSimulation(unittest.TestCase):
         circuit.sdg(1)
         circuit.h(2)
 
+        cache = MagicStateDistillator.Cache()
         state = simulate(
             circuit, no_error_distribution,
             simulate_magic_state_distillation=test_magic_state_distillation)
 
-        state2 = qulacs.QuantumState(4 + NUM_MS_DISTILLATION_ANCILLA_QUBITS)
+        state2 = qulacs.QuantumState(5)
         qulacs.gate.Sdag(0).update_quantum_state(state2)
         qulacs.gate.H(0).update_quantum_state(state2)
         qulacs.gate.H(1).update_quantum_state(state2)
