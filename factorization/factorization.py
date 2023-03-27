@@ -58,13 +58,13 @@ def c_add_mod(circuit: QuantumCircuit, a: int, n: int, N: int, offset: int):
     if a == 0:
         return
 
-    add_a = QuantumCircuit(n)
+    add_a = QuantumCircuit(n, name=f'add_{a}')
     add(add_a, a, n, 0)
 
-    add_n = QuantumCircuit(n)
+    add_n = QuantumCircuit(n, name=f'add_{n}')
     add(add_n, N, n, 0)
 
-    sub_a = QuantumCircuit(n)
+    sub_a = QuantumCircuit(n, name=f'sub_{a}')
     add(sub_a, 2 ** n - a, n, 0)
 
     qreg = circuit.qregs[0]
@@ -139,7 +139,8 @@ def c_mult_mod(circuit: QuantumCircuit, a: int, n: int, N: int):
     (g, (d, e)) = gcd(a, N)
     assert g == 1
     a_inverse = d % N
-    c = QuantumCircuit(2 * n + 3)
+    c = QuantumCircuit(2 * n + 3,
+                       name=f'c_mult_add_mode({a_inverse}, {n}, {N}')
     c_mult_add_mod(c, a_inverse, n, N)
     circuit.append(c.inverse().decompose(), circuit.qregs[0][:c.num_qubits])
 
