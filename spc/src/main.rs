@@ -147,8 +147,8 @@ fn extract_classical_bit(
 }
 
 // Extracts `s` as an angle.
-// Note that the input is QASM-style, e.g., an argument for a RZ gate. On the other hand,
-// the output is in Litinski's style. This function accounts for the style difference,
+// The input is a QASM-style string, e.g., an argument for a RZ gate.
+// The output is in Litinski's style. This function accounts for the style difference,
 // so extract_angle(" pi / 2 ") returns Ok(Angle::PiOver4), for instance.
 //
 // Note also that we ignore the sign of the angle as long as it is a multiple of pi/8.
@@ -159,9 +159,8 @@ fn extract_classical_bit(
 //   4. pi/4 and -pi/4 are equivalent, because P(pi/4) = P(pi/2) * P(-pi/4) = PP(-pi/4) where P is
 //      a Pauli operator. Pauli operators can be applied in the controlling classical computers
 //      with the feed-forward mechanism.
-//   5. P(pi/8) = P(-pi/8) * P(pi/4). Given that we use a magic state for a pi/8 rotation,
-//      the P(pi/8) rotation turns to P(-pi/8) with a 1/2 probability in any case. In that sense,
-//      pi/8 and -pi/8 are equivalent.
+//   5. Given that we use a magic state for a pi/8 rotation, a pi/8 rotation turns to a -pi/8
+//      rotation with a 1/2 probability. In that sense, pi/8 and -pi/8 are equivalent.
 fn extract_angle(s: &str, context: &str) -> Result<Angle, String> {
     let pattern = regex::Regex::new(r" pi */ *([0-9]+) *$").unwrap();
     let minus_pattern = regex::Regex::new(r"^ * - *([0-9]+\.[0-9]+) *$").unwrap();
