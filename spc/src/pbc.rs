@@ -87,6 +87,28 @@ impl Axis {
     pub fn len(&self) -> usize {
         self.axis.len()
     }
+
+    #[allow(dead_code)]
+    pub fn has_x(&self) -> bool {
+        self.axis.iter().any(|p| *p == Pauli::X)
+    }
+    pub fn has_y(&self) -> bool {
+        self.axis.iter().any(|p| *p == Pauli::Y)
+    }
+    pub fn has_only_z_and_i(&self) -> bool {
+        self.axis.iter().all(|p| *p == Pauli::Z || *p == Pauli::I)
+    }
+
+    pub fn has_overlapping_support_larger_than_one_qubit(&self, other: &Axis) -> bool {
+        assert_eq!(self.axis.len(), other.axis.len());
+        use Pauli::I;
+        self.axis
+            .iter()
+            .zip(other.axis.iter())
+            .filter(|(a, b)| a != &&I && b != &&I)
+            .count()
+            > 1
+    }
 }
 
 impl std::ops::Index<usize> for Axis {
@@ -143,13 +165,6 @@ impl PauliRotation {
         self.angle == Angle::PiOver4
     }
 
-    pub fn has_single_qubit_support(&self) -> bool {
-        self.axis.iter().filter(|p| **p != Pauli::I).count() == 1
-    }
-    pub fn has_multi_qubit_support(&self) -> bool {
-        self.axis.iter().filter(|p| **p != Pauli::I).count() > 1
-    }
-
     pub fn new(axis: Axis, angle: Angle) -> Self {
         PauliRotation { axis, angle }
     }
@@ -187,14 +202,14 @@ impl Operator {
 
     pub fn is_single_qubit_clifford(&self) -> bool {
         match self {
-            Operator::PauliRotation(r) => r.is_clifford() && r.has_single_qubit_support(),
+            Operator::PauliRotation(r) => r.is_clifford() && self.has_single_qubit_support(),
             Operator::Measurement(..) => false,
         }
     }
 
     pub fn is_multi_qubit_clifford(&self) -> bool {
         match self {
-            Operator::PauliRotation(r) => r.is_clifford() && r.has_multi_qubit_support(),
+            Operator::PauliRotation(r) => r.is_clifford() && self.has_multi_qubit_support(),
             Operator::Measurement(..) => false,
         }
     }
@@ -204,6 +219,17 @@ impl Operator {
             Operator::PauliRotation(r) => &r.axis,
             Operator::Measurement(a) => a,
         }
+    }
+
+    pub fn has_single_qubit_support(&self) -> bool {
+        self.axis().iter().filter(|p| **p != Pauli::I).count() == 1
+    }
+    pub fn has_multi_qubit_support(&self) -> bool {
+        self.axis().iter().filter(|p| **p != Pauli::I).count() > 1
+    }
+
+    pub fn commutes_with(&self, other: &Operator) -> bool {
+        self.axis().commutes_with(other.axis())
     }
 }
 
@@ -401,7 +427,6 @@ pub fn spc_compact_translation(ops: &Vec<Operator>) -> Vec<(Operator, u32)> {
     result
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,6 +499,107 @@ mod tests {
         assert!(new_axis("XYZ").commutes_with(&new_axis("YYY")));
         assert!(!new_axis("XYZ").commutes_with(&new_axis("YYZ")));
         assert!(!new_axis("IXYZ").commutes_with(&new_axis("IYYZ")));
+    }
+
+    #[test]
+    fn test_axis_has_x() {
+        assert!(!new_axis("").has_x());
+
+        assert!(!new_axis("I").has_x());
+        assert!(new_axis("X").has_x());
+        assert!(!new_axis("Y").has_x());
+        assert!(!new_axis("Z").has_x());
+
+        assert!(!new_axis("II").has_x());
+        assert!(new_axis("XI").has_x());
+        assert!(!new_axis("YI").has_x());
+        assert!(!new_axis("ZI").has_x());
+        assert!(new_axis("IX").has_x());
+        assert!(new_axis("XX").has_x());
+        assert!(new_axis("YX").has_x());
+        assert!(new_axis("ZX").has_x());
+        assert!(!new_axis("IY").has_x());
+        assert!(new_axis("XY").has_x());
+        assert!(!new_axis("YY").has_x());
+        assert!(!new_axis("ZY").has_x());
+        assert!(!new_axis("IZ").has_x());
+        assert!(new_axis("XZ").has_x());
+        assert!(!new_axis("YZ").has_x());
+        assert!(!new_axis("ZZ").has_x());
+    }
+
+    #[test]
+    fn test_axis_has_y() {
+        assert!(!new_axis("").has_y());
+
+        assert!(!new_axis("I").has_y());
+        assert!(!new_axis("X").has_y());
+        assert!(new_axis("Y").has_y());
+        assert!(!new_axis("Z").has_y());
+
+        assert!(!new_axis("II").has_y());
+        assert!(!new_axis("XI").has_y());
+        assert!(new_axis("YI").has_y());
+        assert!(!new_axis("ZI").has_y());
+        assert!(!new_axis("IX").has_y());
+        assert!(!new_axis("XX").has_y());
+        assert!(new_axis("YX").has_y());
+        assert!(!new_axis("ZX").has_y());
+        assert!(new_axis("IY").has_y());
+        assert!(new_axis("XY").has_y());
+        assert!(new_axis("YY").has_y());
+        assert!(new_axis("ZY").has_y());
+        assert!(!new_axis("IZ").has_y());
+        assert!(!new_axis("XZ").has_y());
+        assert!(new_axis("YZ").has_y());
+        assert!(!new_axis("ZZ").has_y());
+    }
+
+    #[test]
+    fn test_axis_has_only_z_and_i() {
+        assert!(new_axis("").has_only_z_and_i());
+
+        assert!(new_axis("I").has_only_z_and_i());
+        assert!(!new_axis("X").has_only_z_and_i());
+        assert!(!new_axis("Y").has_only_z_and_i());
+        assert!(new_axis("Z").has_only_z_and_i());
+
+        assert!(new_axis("II").has_only_z_and_i());
+        assert!(!new_axis("XI").has_only_z_and_i());
+        assert!(!new_axis("YI").has_only_z_and_i());
+        assert!(new_axis("ZI").has_only_z_and_i());
+        assert!(!new_axis("IX").has_only_z_and_i());
+        assert!(!new_axis("XX").has_only_z_and_i());
+        assert!(!new_axis("YX").has_only_z_and_i());
+        assert!(!new_axis("ZX").has_only_z_and_i());
+        assert!(!new_axis("IY").has_only_z_and_i());
+        assert!(!new_axis("XY").has_only_z_and_i());
+        assert!(!new_axis("YY").has_only_z_and_i());
+        assert!(!new_axis("ZY").has_only_z_and_i());
+        assert!(new_axis("IZ").has_only_z_and_i());
+        assert!(!new_axis("XZ").has_only_z_and_i());
+        assert!(!new_axis("YZ").has_only_z_and_i());
+        assert!(new_axis("ZZ").has_only_z_and_i());
+    }
+
+    #[test]
+    fn test_has_overlapping_support_larger_than_one_qubit() {
+        assert!(
+            !new_axis("IIIII").has_overlapping_support_larger_than_one_qubit(&new_axis("IIIII"))
+        );
+        assert!(
+            !new_axis("IIIII").has_overlapping_support_larger_than_one_qubit(&new_axis("XXXXX"))
+        );
+        assert!(
+            !new_axis("IXIXX").has_overlapping_support_larger_than_one_qubit(&new_axis("YIYII"))
+        );
+        assert!(
+            !new_axis("IXIXX").has_overlapping_support_larger_than_one_qubit(&new_axis("YYYII"))
+        );
+
+        assert!(new_axis("IXIXX").has_overlapping_support_larger_than_one_qubit(&new_axis("YYYIX")));
+        assert!(new_axis("IXZII").has_overlapping_support_larger_than_one_qubit(&new_axis("IXZII")));
+        assert!(new_axis("XXXXX").has_overlapping_support_larger_than_one_qubit(&new_axis("YYYYY")));
     }
 
     #[test]
@@ -710,7 +836,7 @@ mod tests {
             ]
         );
     }
-   
+
     #[test]
     fn test_spc_compact_translation() {
         use Operator::PauliRotation as R;
@@ -736,5 +862,4 @@ mod tests {
             ]
         );
     }
-
 }
