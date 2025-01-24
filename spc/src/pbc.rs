@@ -41,6 +41,41 @@ impl Pauli {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum Sign {
+    Plus,
+    Minus,
+}
+
+impl std::ops::Mul<Sign> for Sign {
+    type Output = Self;
+
+    fn mul(self, sign: Sign) -> Self {
+        if self == sign {
+            Sign::Plus
+        } else {
+            Sign::Minus
+        }
+    }
+}
+
+impl std::ops::MulAssign<Sign> for Sign {
+    fn mul_assign(&mut self, sign: Sign) {
+        *self = *self * sign;
+    }
+}
+
+impl std::ops::Neg for Sign {
+    type Output = Self;
+
+    fn neg(self) -> Self {
+        match self {
+            Sign::Plus => Sign::Minus,
+            Sign::Minus => Sign::Plus,
+        }
+    }
+}
+
 // Axis is a multi-qubit Pauli operator and it represents the rotation axis of a Pauli rotation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Axis {
@@ -70,16 +105,6 @@ impl Axis {
         count % 2 == 0
     }
 
-    pub fn transform(&mut self, other: &Axis) {
-        assert_eq!(self.len(), other.len());
-        if self.commutes_with(other) {
-            return;
-        }
-        for (a, b) in self.axis.iter_mut().zip(other.axis.iter()) {
-            *a = *a * *b;
-        }
-    }
-
     pub fn iter(&self) -> std::slice::Iter<Pauli> {
         self.axis.iter()
     }
@@ -92,13 +117,16 @@ impl Axis {
     pub fn has_x(&self) -> bool {
         self.axis.iter().any(|p| *p == Pauli::X)
     }
+    #[allow(dead_code)]
     pub fn has_y(&self) -> bool {
         self.axis.iter().any(|p| *p == Pauli::Y)
     }
+    #[allow(dead_code)]
     pub fn has_only_z_and_i(&self) -> bool {
         self.axis.iter().all(|p| *p == Pauli::Z || *p == Pauli::I)
     }
 
+    #[allow(dead_code)]
     pub fn has_overlapping_support_larger_than_one_qubit(&self, other: &Axis) -> bool {
         assert_eq!(self.axis.len(), other.axis.len());
         use Pauli::I;
@@ -143,14 +171,80 @@ impl std::fmt::Display for Axis {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mod8 {
+    Zero,
+    One,
+    Two,
+    Three,
+    Four,
+    Five,
+    Six,
+    Seven,
+}
+
+impl Mod8 {
+    pub fn from(n: u32) -> Self {
+        match n % 8 {
+            0 => Mod8::Zero,
+            1 => Mod8::One,
+            2 => Mod8::Two,
+            3 => Mod8::Three,
+            4 => Mod8::Four,
+            5 => Mod8::Five,
+            6 => Mod8::Six,
+            7 => Mod8::Seven,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn to_u32(&self) -> u32 {
+        match self {
+            Mod8::Zero => 0,
+            Mod8::One => 1,
+            Mod8::Two => 2,
+            Mod8::Three => 3,
+            Mod8::Four => 4,
+            Mod8::Five => 5,
+            Mod8::Six => 6,
+            Mod8::Seven => 7,
+        }
+    }
+}
+
+impl std::ops::Neg for Mod8 {
+    type Output = Self;
+    fn neg(self) -> Self {
+        match self {
+            Mod8::Zero => Mod8::Zero,
+            Mod8::One => Mod8::Seven,
+            Mod8::Two => Mod8::Six,
+            Mod8::Three => Mod8::Five,
+            Mod8::Four => Mod8::Four,
+            Mod8::Five => Mod8::Three,
+            Mod8::Six => Mod8::Two,
+            Mod8::Seven => Mod8::One,
+        }
+    }
+}
+
 // Angle represents the rotation angle of a Pauli rotation.
+// Since exp(-i * pi * P) = I for every Pauli operator P, we only need to consider angle modulo pi.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Angle {
-    Zero,
-    PiOver2,
-    PiOver4,
-    PiOver8,
+    // PiOver8(n) represents n * pi / 8.
+    PiOver8(Mod8),
     Arbitrary(f64),
+}
+
+impl std::ops::Neg for Angle {
+    type Output = Self;
+    fn neg(self) -> Self {
+        match self {
+            Angle::PiOver8(n) => Angle::PiOver8(-n),
+            Angle::Arbitrary(angle) => Angle::Arbitrary(-angle),
+        }
+    }
 }
 
 // PauliRotation represents a Pauli rotation consisting of a rotation axis and an angle.
@@ -162,26 +256,65 @@ pub struct PauliRotation {
 
 impl PauliRotation {
     pub fn is_clifford(&self) -> bool {
-        self.angle == Angle::PiOver4
+        use Angle::*;
+        use Mod8::*;
+        match self.angle {
+            PiOver8(Zero) | PiOver8(Two) | PiOver8(Four) | PiOver8(Six) => true,
+            PiOver8(One) | PiOver8(Three) | PiOver8(Five) | PiOver8(Seven) | Arbitrary(_) => false,
+        }
+    }
+
+    pub fn transform(&mut self, clifford_rotation: &PauliRotation) {
+        use Mod8::*;
+        use Pauli::*;
+        assert!(clifford_rotation.is_clifford());
+        if self.axis.commutes_with(&clifford_rotation.axis) {
+            return;
+        }
+
+        let mut sign = match clifford_rotation.angle {
+            Angle::PiOver8(Zero) => {
+                return;
+            }
+            Angle::PiOver8(Four) => {
+                self.angle = -self.angle;
+                return;
+            }
+            Angle::PiOver8(Two) => Sign::Plus,
+            Angle::PiOver8(Six) => Sign::Minus,
+            _ => unreachable!(),
+        };
+        for (a, b) in self.axis.axis.iter_mut().zip(clifford_rotation.axis.iter()) {
+            match (*a, *b) {
+                (I, I) | (X, X) | (Y, Y) | (Z, Z) | (I, _) | (_, I) => {}
+                (X, Y) | (Y, Z) | (Z, X) => {}
+                (Y, X) | (Z, Y) | (X, Z) => {
+                    sign = -sign;
+                }
+            }
+            *a = *a * *b;
+        }
+        if sign == Sign::Minus {
+            self.angle = -self.angle;
+        }
     }
 
     pub fn new(axis: Axis, angle: Angle) -> Self {
         PauliRotation { axis, angle }
     }
-
-    pub fn new_clifford(axis: Axis) -> Self {
-        PauliRotation::new(axis, Angle::PiOver4)
-    }
-
-    #[cfg(test)]
-    pub fn new_pi_over_8(axis: Axis) -> Self {
-        PauliRotation::new(axis, Angle::PiOver8)
-    }
 }
 
 impl std::fmt::Display for PauliRotation {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "axis: {}, angle: {:?}", self.axis, self.angle)
+        use Angle::*;
+        match self.angle {
+            PiOver8(n) => {
+                write!(f, "axis: {}, angle: PiOver8({})", self.axis, n.to_u32())
+            }
+            Arbitrary(angle) => {
+                write!(f, "axis: {}, angle: {}", self.axis, angle)
+            }
+        }
     }
 }
 
@@ -228,6 +361,7 @@ impl Operator {
         self.axis().iter().filter(|p| **p != Pauli::I).count() > 1
     }
 
+    #[allow(dead_code)]
     pub fn commutes_with(&self, other: &Operator) -> bool {
         self.axis().commutes_with(other.axis())
     }
@@ -244,27 +378,47 @@ impl std::fmt::Display for Operator {
 
 // Performs the SPC translation.
 pub fn spc_translation(ops: &Vec<Operator>) -> Vec<Operator> {
+    use Angle::*;
+    use Mod8::*;
     let mut result = Vec::new();
     let mut clifford_rotations = Vec::new();
     for op in ops {
         match op {
             Operator::PauliRotation(r) => {
-                if r.is_clifford() {
-                    clifford_rotations.push(r.clone());
-                } else {
-                    let mut rotation = r.clone();
-                    for clifford_rotation in clifford_rotations.iter().rev() {
-                        rotation.axis.transform(&clifford_rotation.axis);
+                let angle = match r.angle {
+                    PiOver8(Zero) => {
+                        continue;
                     }
-                    result.push(Operator::PauliRotation(rotation));
+                    PiOver8(Two) | PiOver8(Four) | PiOver8(Six) => {
+                        clifford_rotations.push(r.clone());
+                        continue;
+                    }
+                    PiOver8(Three) => {
+                        clifford_rotations.push(PauliRotation::new(r.axis.clone(), PiOver8(Four)));
+                        -PiOver8(One)
+                    }
+                    PiOver8(Five) => {
+                        clifford_rotations.push(PauliRotation::new(r.axis.clone(), PiOver8(Four)));
+                        PiOver8(One)
+                    }
+                    PiOver8(One) | PiOver8(Seven) | Arbitrary(_) => r.angle,
+                };
+                assert!(matches!(
+                    angle,
+                    PiOver8(One) | PiOver8(Seven) | Arbitrary(_)
+                ));
+                let mut rotation = PauliRotation::new(r.axis.clone(), angle);
+                for clifford_rotation in clifford_rotations.iter().rev() {
+                    rotation.transform(clifford_rotation);
                 }
+                result.push(Operator::PauliRotation(rotation));
             }
             Operator::Measurement(axis) => {
-                let mut a = axis.clone();
+                let mut r = PauliRotation::new(axis.clone(), Angle::PiOver8(Mod8::Four));
                 for clifford_rotation in clifford_rotations.iter().rev() {
-                    a.transform(&clifford_rotation.axis);
+                    r.transform(clifford_rotation);
                 }
-                result.push(Operator::Measurement(a));
+                result.push(Operator::Measurement(r.axis.clone()));
             }
         }
     }
@@ -296,7 +450,7 @@ fn spc_compact_translation_one(op: &Operator) -> (Vec<PauliRotation>, u32) {
                 })
                 .collect(),
         );
-        clifford_operations.push(PauliRotation::new_clifford(rotation_axis));
+        clifford_operations.push(PauliRotation::new(rotation_axis, Angle::PiOver8(Mod8::Two)));
         additional_clocks += 1;
     } else {
         // Apply two XY permutations.
@@ -318,7 +472,7 @@ fn spc_compact_translation_one(op: &Operator) -> (Vec<PauliRotation>, u32) {
                 })
                 .collect(),
         );
-        clifford_operations.push(PauliRotation::new_clifford(rotation_axis));
+        clifford_operations.push(PauliRotation::new(rotation_axis, Angle::PiOver8(Mod8::Two)));
         let mut first = true;
         let rotation_axis = Axis::new(
             axis.iter()
@@ -337,7 +491,7 @@ fn spc_compact_translation_one(op: &Operator) -> (Vec<PauliRotation>, u32) {
                 })
                 .collect(),
         );
-        clifford_operations.push(PauliRotation::new_clifford(rotation_axis));
+        clifford_operations.push(PauliRotation::new(rotation_axis, Angle::PiOver8(Mod8::Two)));
         additional_clocks += 2;
     }
     let mut has_xy = false;
@@ -351,11 +505,18 @@ fn spc_compact_translation_one(op: &Operator) -> (Vec<PauliRotation>, u32) {
         let a = axis[i];
         let a_xy = a == Pauli::X || a == Pauli::Y;
         if a_xy {
-            clifford_operations.push(PauliRotation::new_clifford(Axis::new_with_pauli(
-                i,
-                axis.len(),
-                Pauli::Y,
-            )));
+            clifford_operations.push(PauliRotation::new(
+                Axis::new_with_pauli(i, axis.len(), Pauli::Z),
+                Angle::PiOver8(Mod8::Two),
+            ));
+            clifford_operations.push(PauliRotation::new(
+                Axis::new_with_pauli(i, axis.len(), Pauli::X),
+                Angle::PiOver8(Mod8::Two),
+            ));
+            clifford_operations.push(PauliRotation::new(
+                Axis::new_with_pauli(i, axis.len(), Pauli::Z),
+                Angle::PiOver8(Mod8::Two),
+            ));
             has_xy = true;
         }
 
@@ -367,11 +528,18 @@ fn spc_compact_translation_one(op: &Operator) -> (Vec<PauliRotation>, u32) {
         let b_xy = b == Pauli::X || b == Pauli::Y;
         if b_xy {
             has_xy = true;
-            clifford_operations.push(PauliRotation::new_clifford(Axis::new_with_pauli(
-                i + 1,
-                axis.len(),
-                Pauli::Y,
-            )));
+            clifford_operations.push(PauliRotation::new(
+                Axis::new_with_pauli(i + 1, axis.len(), Pauli::Z),
+                Angle::PiOver8(Mod8::Two),
+            ));
+            clifford_operations.push(PauliRotation::new(
+                Axis::new_with_pauli(i + 1, axis.len(), Pauli::X),
+                Angle::PiOver8(Mod8::Two),
+            ));
+            clifford_operations.push(PauliRotation::new(
+                Axis::new_with_pauli(i + 1, axis.len(), Pauli::Z),
+                Angle::PiOver8(Mod8::Two),
+            ));
         }
 
         if i == 0 {
@@ -406,16 +574,16 @@ pub fn spc_compact_translation(ops: &Vec<Operator>) -> Vec<(Operator, u32)> {
                 assert!(!r.is_clifford());
                 let mut rotation = r.clone();
                 for clifford_rotation in clifford_rotations.iter() {
-                    rotation.axis.transform(&clifford_rotation.axis);
+                    rotation.transform(clifford_rotation);
                 }
                 op = Operator::PauliRotation(rotation);
             }
             Operator::Measurement(axis) => {
-                let mut a = axis.clone();
+                let mut r = PauliRotation::new(axis.clone(), Angle::PiOver8(Mod8::Four));
                 for clifford_rotation in clifford_rotations.iter() {
-                    a.transform(&clifford_rotation.axis);
+                    r.transform(clifford_rotation);
                 }
-                op = Operator::Measurement(a);
+                op = Operator::Measurement(r.axis.clone());
             }
         }
 
@@ -603,46 +771,220 @@ mod tests {
     }
 
     #[test]
-    fn test_tranform_axis() {
+    fn test_tranform_rotation() {
+        use Angle::PiOver8;
+        use Mod8::*;
         {
-            let mut axis = new_axis("XXYZ");
-            axis.transform(&new_axis("IIII"));
+            let mut r = PauliRotation::new(new_axis("XXYZ"), PiOver8(One));
+            r.transform(&PauliRotation::new(new_axis("IIII"), PiOver8(Two)));
 
-            assert_eq!(axis, new_axis("XXYZ"));
+            assert_eq!(r, PauliRotation::new(new_axis("XXYZ"), PiOver8(One)));
         }
 
         {
-            let mut axis = new_axis("XXYZ");
-            axis.transform(&new_axis("YYYY"));
+            let mut r = PauliRotation::new(new_axis("XXYZ"), PiOver8(One));
+            r.transform(&PauliRotation::new(new_axis("IIII"), -PiOver8(Two)));
 
-            assert_eq!(axis, new_axis("ZZIX"));
+            assert_eq!(r, PauliRotation::new(new_axis("XXYZ"), PiOver8(One)));
         }
 
         {
-            let mut axis = new_axis("XXYZ");
-            axis.transform(&new_axis("IIZI"));
+            let mut r = PauliRotation::new(new_axis("X"), PiOver8(One));
+            r.transform(&PauliRotation::new(new_axis("Z"), PiOver8(Four)));
 
-            assert_eq!(axis, new_axis("XXXZ"));
+            assert_eq!(r, PauliRotation::new(new_axis("X"), -PiOver8(One)));
         }
 
         {
-            let mut axis = new_axis("IZZI");
-            axis.transform(&new_axis("IIXI"));
+            let mut r = PauliRotation::new(new_axis("X"), PiOver8(One));
+            r.transform(&PauliRotation::new(new_axis("Y"), PiOver8(Four)));
 
-            assert_eq!(axis, new_axis("IZYI"));
+            assert_eq!(r, PauliRotation::new(new_axis("X"), -PiOver8(One)));
+        }
+
+        {
+            let mut r = PauliRotation::new(new_axis("X"), -PiOver8(One));
+            r.transform(&PauliRotation::new(new_axis("Z"), PiOver8(Four)));
+
+            assert_eq!(r, PauliRotation::new(new_axis("X"), PiOver8(One)));
+        }
+
+        {
+            let mut r = PauliRotation::new(new_axis("X"), -PiOver8(One));
+            r.transform(&PauliRotation::new(new_axis("Y"), PiOver8(Four)));
+
+            assert_eq!(r, PauliRotation::new(new_axis("X"), PiOver8(One)));
+        }
+
+        {
+            let mut r = PauliRotation::new(new_axis("X"), PiOver8(One));
+            r.transform(&PauliRotation::new(new_axis("Z"), PiOver8(Two)));
+
+            assert_eq!(r, PauliRotation::new(new_axis("Y"), -PiOver8(One)));
+        }
+
+        {
+            let mut r = PauliRotation::new(new_axis("Y"), PiOver8(One));
+            r.transform(&PauliRotation::new(new_axis("Z"), PiOver8(Two)));
+
+            assert_eq!(r, PauliRotation::new(new_axis("X"), PiOver8(One)));
+        }
+
+        {
+            let mut r = PauliRotation::new(new_axis("X"), -PiOver8(One));
+            r.transform(&PauliRotation::new(new_axis("Z"), PiOver8(Two)));
+
+            assert_eq!(r, PauliRotation::new(new_axis("Y"), PiOver8(One)));
+        }
+
+        {
+            let mut r = PauliRotation::new(new_axis("Y"), -PiOver8(One));
+            r.transform(&PauliRotation::new(new_axis("Z"), PiOver8(Two)));
+
+            assert_eq!(r, PauliRotation::new(new_axis("X"), -PiOver8(One)));
+        }
+
+        {
+            let mut r = PauliRotation::new(new_axis("X"), PiOver8(One));
+            r.transform(&PauliRotation::new(new_axis("Z"), -PiOver8(Two)));
+
+            assert_eq!(r, PauliRotation::new(new_axis("Y"), PiOver8(One)));
+        }
+
+        {
+            let mut r = PauliRotation::new(new_axis("Y"), PiOver8(One));
+            r.transform(&PauliRotation::new(new_axis("Z"), -PiOver8(Two)));
+
+            assert_eq!(r, PauliRotation::new(new_axis("X"), -PiOver8(One)));
+        }
+
+        {
+            let mut r = PauliRotation::new(new_axis("XXYZ"), PiOver8(One));
+            r.transform(&PauliRotation::new(new_axis("IIZI"), PiOver8(Two)));
+
+            assert_eq!(r, PauliRotation::new(new_axis("XXXZ"), PiOver8(One)));
+        }
+
+        {
+            let mut r = PauliRotation::new(new_axis("IZZI"), PiOver8(One));
+            r.transform(&PauliRotation::new(new_axis("IIXI"), PiOver8(Two)));
+
+            assert_eq!(r, PauliRotation::new(new_axis("IZYI"), PiOver8(One)));
         }
     }
 
     #[test]
+    fn test_spc_translation_trivial() {
+        use Angle::PiOver8;
+        use Mod8::*;
+        use Operator::PauliRotation as R;
+        let ops = vec![
+            R(PauliRotation::new(new_axis("IIIXI"), PiOver8(One))),
+            R(PauliRotation::new(new_axis("IIIYI"), PiOver8(Two))),
+        ];
+
+        let result = spc_translation(&ops);
+        assert_eq!(
+            result,
+            vec![R(PauliRotation::new(new_axis("IIIXI"), PiOver8(One)))],
+        );
+    }
+
+    #[test]
+    fn test_spc_translation_commuting() {
+        use Angle::PiOver8;
+        use Mod8::*;
+        use Operator::PauliRotation as R;
+        let ops = vec![
+            R(PauliRotation::new(new_axis("IIZXI"), PiOver8(Two))),
+            R(PauliRotation::new(new_axis("ZIIII"), PiOver8(Six))),
+            R(PauliRotation::new(new_axis("IIXYI"), PiOver8(One))),
+        ];
+
+        let result = spc_translation(&ops);
+        assert_eq!(
+            result,
+            vec![R(PauliRotation::new(new_axis("IIXYI"), PiOver8(One)))],
+        );
+    }
+
+    #[test]
+    fn test_spc_translation_tiny_1() {
+        use Angle::PiOver8;
+        use Mod8::*;
+        use Operator::PauliRotation as R;
+        let ops = vec![
+            R(PauliRotation::new(new_axis("Z"), PiOver8(Two))),
+            R(PauliRotation::new(new_axis("Y"), PiOver8(One))),
+        ];
+
+        // Given S * X * Sdg = Y, S * exp(i * theta * X) * Sdg = exp(i * theta * Y). Therefore,
+        //    exp(i * Y * pi / 8) * S
+        //  = S * exp(i * X * pi / 8) * Sdg * S
+        //  = S * exp(i * X * pi / 8).
+        let result = spc_translation(&ops);
+        assert_eq!(
+            result,
+            vec![R(PauliRotation::new(new_axis("X"), PiOver8(One)))],
+        );
+    }
+
+    #[test]
+    fn test_spc_translation_tiny_2() {
+        use Angle::PiOver8;
+        use Mod8::*;
+        use Operator::PauliRotation as R;
+        let ops = vec![
+            R(PauliRotation::new(new_axis("Z"), PiOver8(Two))),
+            R(PauliRotation::new(new_axis("X"), PiOver8(One))),
+        ];
+
+        // Given S * Y * Sdg = -X, S * exp(i * theta * Y) * Sdg = exp(-i * theta * X). Therefore,
+        //    exp(i * X * pi / 8) * S
+        //  = S * exp(-i * Y * pi / 8) * Sdg * S
+        //  = S * exp(-i * Y * pi / 8).
+        let result = spc_translation(&ops);
+        assert_eq!(
+            result,
+            vec![R(PauliRotation::new(new_axis("Y"), -PiOver8(One)))],
+        );
+    }
+
+    #[test]
+    fn test_spc_translation_tiny_3() {
+        use Angle::PiOver8;
+        use Mod8::*;
+        use Operator::PauliRotation as R;
+        let ops = vec![
+            R(PauliRotation::new(new_axis("Z"), PiOver8(Six))),
+            R(PauliRotation::new(new_axis("Y"), PiOver8(One))),
+        ];
+
+        // Given S * X * Sdg = Y, S * exp(i * theta * X) * Sdg = exp(i * theta * Y). Therefore,
+        //    exp(i * Y * pi / 8) * Sdg
+        //  = S * exp(i * X * pi / 8) * Sdg * Sdg
+        //  = S * exp(i * X * pi / 8) * Z
+        //  = S * Z * exp(-i * X * pi / 8)
+        //  = Sdg * exp(-i * X * pi / 8)
+        let result = spc_translation(&ops);
+        assert_eq!(
+            result,
+            vec![R(PauliRotation::new(new_axis("X"), -PiOver8(One)))],
+        );
+    }
+
+    #[test]
     fn test_spc_translation_cx() {
+        use Angle::PiOver8;
+        use Mod8::*;
         use Operator::Measurement as M;
         use Operator::PauliRotation as R;
         let ops = vec![
-            R(PauliRotation::new_clifford(new_axis("IZII"))),
-            R(PauliRotation::new_clifford(new_axis("IIXI"))),
-            R(PauliRotation::new_clifford(new_axis("IZXI"))),
-            R(PauliRotation::new_pi_over_8(new_axis("ZIII"))),
-            R(PauliRotation::new_pi_over_8(new_axis("IIZI"))),
+            R(PauliRotation::new(new_axis("IZII"), -PiOver8(Two))),
+            R(PauliRotation::new(new_axis("IIXI"), -PiOver8(Two))),
+            R(PauliRotation::new(new_axis("IZXI"), PiOver8(Two))),
+            R(PauliRotation::new(new_axis("ZIII"), PiOver8(One))),
+            R(PauliRotation::new(new_axis("IIZI"), PiOver8(One))),
             M(new_axis("IIZI")),
         ];
 
@@ -650,100 +992,160 @@ mod tests {
         assert_eq!(
             result,
             vec![
-                R(PauliRotation::new_pi_over_8(new_axis("ZIII"))),
-                R(PauliRotation::new_pi_over_8(new_axis("IZZI"))),
+                R(PauliRotation::new(new_axis("ZIII"), PiOver8(One))),
+                R(PauliRotation::new(new_axis("IZZI"), PiOver8(One))),
                 M(new_axis("IZZI"))
             ]
         );
     }
 
     #[test]
-    fn test_spc_translation_tiny() {
+    fn test_spc_translation_small() {
+        use Angle::PiOver8;
+        use Mod8::*;
         use Operator::PauliRotation as R;
         let ops = vec![
-            R(PauliRotation::new_clifford(new_axis("IIIXI"))),
-            R(PauliRotation::new_clifford(new_axis("IIIZI"))),
-            R(PauliRotation::new_clifford(new_axis("IIZII"))),
-            R(PauliRotation::new_clifford(new_axis("IIIXI"))),
-            R(PauliRotation::new_clifford(new_axis("IIZXI"))),
-            R(PauliRotation::new_pi_over_8(new_axis("IIIZI"))),
+            R(PauliRotation::new(new_axis("IIIXI"), PiOver8(Two))),
+            R(PauliRotation::new(new_axis("IIIZI"), PiOver8(Two))),
+            R(PauliRotation::new(new_axis("IIZII"), PiOver8(Two))),
+            R(PauliRotation::new(new_axis("IIIXI"), PiOver8(Two))),
+            R(PauliRotation::new(new_axis("IIZXI"), PiOver8(Two))),
+            R(PauliRotation::new(new_axis("IIIZI"), PiOver8(One))),
         ];
 
         let result = spc_translation(&ops);
         assert_eq!(
             result,
-            vec![R(PauliRotation::new_pi_over_8(new_axis("IIZYI")))]
+            vec![R(PauliRotation::new(new_axis("IIZYI"), -PiOver8(One)))]
         );
     }
+
+    #[test]
+    fn test_spc_translation_with_various_angles() {
+        use Angle::PiOver8;
+        use Mod8::*;
+        use Operator::PauliRotation as R;
+        let ops = vec![
+            R(PauliRotation::new(new_axis("IIIZI"), PiOver8(Six))),
+            R(PauliRotation::new(new_axis("IZIXI"), PiOver8(Five))),
+            R(PauliRotation::new(new_axis("IXZII"), PiOver8(Three))),
+            R(PauliRotation::new(new_axis("IXIII"), PiOver8(Seven))),
+            R(PauliRotation::new(new_axis("IIIYI"), PiOver8(Three))),
+        ];
+
+        let result = spc_translation(&ops);
+        assert_eq!(
+            result,
+            vec![
+                R(PauliRotation::new(new_axis("IZIYI"), PiOver8(One))),
+                R(PauliRotation::new(new_axis("IXZII"), PiOver8(One))),
+                R(PauliRotation::new(new_axis("IXIII"), PiOver8(One))),
+                R(PauliRotation::new(new_axis("IIIXI"), PiOver8(Seven))),
+            ]
+        );
+    }
+
     #[test]
     fn test_spc_compact_translation_one_trivial() {
+        use Angle::PiOver8;
+        use Mod8::*;
         use Operator::PauliRotation as R;
 
         let (clifford_ops, additional_clocks) =
-            spc_compact_translation_one(&R(PauliRotation::new_pi_over_8(new_axis("IIIIII"))));
+            spc_compact_translation_one(&R(PauliRotation::new(new_axis("IIIIII"), PiOver8(One))));
         assert_eq!(clifford_ops.len(), 0);
         assert_eq!(additional_clocks, 0);
     }
 
     #[test]
     fn test_spc_compact_translation_one_with_no_additional_clocks() {
+        use Angle::PiOver8;
+        use Mod8::*;
         use Operator::PauliRotation as R;
         let (clifford_ops, additional_clocks) =
-            spc_compact_translation_one(&R(PauliRotation::new_pi_over_8(new_axis("ZZIZZZ"))));
+            spc_compact_translation_one(&R(PauliRotation::new(new_axis("ZZIZZZ"), PiOver8(One))));
         assert_eq!(clifford_ops.len(), 0);
         assert_eq!(additional_clocks, 0);
     }
 
     #[test]
     fn test_spc_compact_translation_one_with_xz_permutation() {
+        use Angle::PiOver8;
+        use Mod8::*;
         use Operator::PauliRotation as R;
         {
-            let (clifford_ops, additional_clocks) =
-                spc_compact_translation_one(&R(PauliRotation::new_pi_over_8(new_axis("IXIIII"))));
-            assert_eq!(
-                clifford_ops,
-                vec![PauliRotation::new_clifford(new_axis("IYIIII"))]
-            );
-            assert_eq!(additional_clocks, 3);
-        }
-
-        {
-            let (clifford_ops, additional_clocks) =
-                spc_compact_translation_one(&R(PauliRotation::new_pi_over_8(new_axis("XXIIII"))));
+            let (clifford_ops, additional_clocks) = spc_compact_translation_one(&R(
+                PauliRotation::new(new_axis("IXIIII"), PiOver8(One)),
+            ));
             assert_eq!(
                 clifford_ops,
                 vec![
-                    PauliRotation::new_clifford(new_axis("YIIIII")),
-                    PauliRotation::new_clifford(new_axis("IYIIII"))
+                    PauliRotation::new(new_axis("IZIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IXIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IZIIII"), PiOver8(Two))
                 ]
             );
             assert_eq!(additional_clocks, 3);
         }
 
         {
-            let (clifford_ops, additional_clocks) =
-                spc_compact_translation_one(&R(PauliRotation::new_pi_over_8(new_axis("XXXIII"))));
+            let (clifford_ops, additional_clocks) = spc_compact_translation_one(&R(
+                PauliRotation::new(new_axis("XXIIII"), PiOver8(One)),
+            ));
             assert_eq!(
                 clifford_ops,
                 vec![
-                    PauliRotation::new_clifford(new_axis("YIIIII")),
-                    PauliRotation::new_clifford(new_axis("IYIIII")),
-                    PauliRotation::new_clifford(new_axis("IIYIII")),
+                    PauliRotation::new(new_axis("ZIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("XIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("ZIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IZIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IXIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IZIIII"), PiOver8(Two)),
                 ]
             );
             assert_eq!(additional_clocks, 3);
         }
 
         {
-            let (clifford_ops, additional_clocks) =
-                spc_compact_translation_one(&R(PauliRotation::new_pi_over_8(new_axis("XXXXII"))));
+            let (clifford_ops, additional_clocks) = spc_compact_translation_one(&R(
+                PauliRotation::new(new_axis("XXXIII"), PiOver8(One)),
+            ));
             assert_eq!(
                 clifford_ops,
                 vec![
-                    PauliRotation::new_clifford(new_axis("YIIIII")),
-                    PauliRotation::new_clifford(new_axis("IYIIII")),
-                    PauliRotation::new_clifford(new_axis("IIYIII")),
-                    PauliRotation::new_clifford(new_axis("IIIYII")),
+                    PauliRotation::new(new_axis("ZIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("XIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("ZIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IZIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IXIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IZIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IIZIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IIXIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IIZIII"), PiOver8(Two)),
+                ]
+            );
+            assert_eq!(additional_clocks, 3);
+        }
+
+        {
+            let (clifford_ops, additional_clocks) = spc_compact_translation_one(&R(
+                PauliRotation::new(new_axis("XXXXII"), PiOver8(Seven)),
+            ));
+            assert_eq!(
+                clifford_ops,
+                vec![
+                    PauliRotation::new(new_axis("ZIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("XIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("ZIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IZIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IXIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IZIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IIZIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IIXIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IIZIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IIIZII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IIIXII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IIIZII"), PiOver8(Two)),
                 ]
             );
             assert_eq!(additional_clocks, 6);
@@ -752,62 +1154,88 @@ mod tests {
 
     #[test]
     fn test_spc_compact_translation_one_with_xy_permutation() {
+        use Angle::PiOver8;
+        use Mod8::*;
         use Operator::PauliRotation as R;
         {
-            let (clifford_ops, additional_clocks) =
-                spc_compact_translation_one(&R(PauliRotation::new_pi_over_8(new_axis("IYIIII"))));
+            let (clifford_ops, additional_clocks) = spc_compact_translation_one(&R(
+                PauliRotation::new(new_axis("IYIIII"), PiOver8(One)),
+            ));
             assert_eq!(
                 clifford_ops,
                 vec![
-                    PauliRotation::new_clifford(new_axis("IZIIII")),
-                    PauliRotation::new_clifford(new_axis("IYIIII"))
+                    PauliRotation::new(new_axis("IZIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IZIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IXIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IZIIII"), PiOver8(Two)),
                 ]
             );
             assert_eq!(additional_clocks, 4);
         }
 
         {
-            let (clifford_ops, additional_clocks) =
-                spc_compact_translation_one(&R(PauliRotation::new_pi_over_8(new_axis("YYIIII"))));
+            let (clifford_ops, additional_clocks) = spc_compact_translation_one(&R(
+                PauliRotation::new(new_axis("YYIIII"), PiOver8(Seven)),
+            ));
             assert_eq!(
                 clifford_ops,
                 vec![
-                    PauliRotation::new_clifford(new_axis("ZIIIII")),
-                    PauliRotation::new_clifford(new_axis("IZIIII")),
-                    PauliRotation::new_clifford(new_axis("YIIIII")),
-                    PauliRotation::new_clifford(new_axis("IYIIII"))
+                    PauliRotation::new(new_axis("ZIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IZIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("ZIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("XIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("ZIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IZIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IXIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IZIIII"), PiOver8(Two)),
                 ]
             );
             assert_eq!(additional_clocks, 5);
         }
 
         {
-            let (clifford_ops, additional_clocks) =
-                spc_compact_translation_one(&R(PauliRotation::new_pi_over_8(new_axis("YYYIII"))));
+            let (clifford_ops, additional_clocks) = spc_compact_translation_one(&R(
+                PauliRotation::new(new_axis("YYYIII"), PiOver8(One)),
+            ));
             assert_eq!(
                 clifford_ops,
                 vec![
-                    PauliRotation::new_clifford(new_axis("ZZZIII")),
-                    PauliRotation::new_clifford(new_axis("YIIIII")),
-                    PauliRotation::new_clifford(new_axis("IYIIII")),
-                    PauliRotation::new_clifford(new_axis("IIYIII")),
+                    PauliRotation::new(new_axis("ZZZIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("ZIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("XIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("ZIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IZIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IXIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IZIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IIZIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IIXIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IIZIII"), PiOver8(Two)),
                 ]
             );
             assert_eq!(additional_clocks, 4);
         }
 
         {
-            let (clifford_ops, additional_clocks) =
-                spc_compact_translation_one(&R(PauliRotation::new_pi_over_8(new_axis("YYYYII"))));
+            let (clifford_ops, additional_clocks) = spc_compact_translation_one(&R(
+                PauliRotation::new(new_axis("YYYYII"), PiOver8(Seven)),
+            ));
             assert_eq!(
                 clifford_ops,
                 vec![
-                    PauliRotation::new_clifford(new_axis("ZIIIII")),
-                    PauliRotation::new_clifford(new_axis("IZZZII")),
-                    PauliRotation::new_clifford(new_axis("YIIIII")),
-                    PauliRotation::new_clifford(new_axis("IYIIII")),
-                    PauliRotation::new_clifford(new_axis("IIYIII")),
-                    PauliRotation::new_clifford(new_axis("IIIYII")),
+                    PauliRotation::new(new_axis("ZIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IZZZII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("ZIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("XIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("ZIIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IZIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IXIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IZIIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IIZIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IIXIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IIZIII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IIIZII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IIIXII"), PiOver8(Two)),
+                    PauliRotation::new(new_axis("IIIZII"), PiOver8(Two)),
                 ]
             );
             assert_eq!(additional_clocks, 8);
@@ -815,50 +1243,72 @@ mod tests {
     }
 
     #[test]
+    fn test_spc_compact_translation_tiny() {
+        use Angle::PiOver8;
+        use Mod8::*;
+        use Operator::PauliRotation as R;
+
+        let ops = vec![R(PauliRotation::new(
+            new_axis("Y"),
+            Angle::PiOver8(Mod8::One),
+        ))];
+
+        let result = spc_compact_translation(&ops);
+        assert_eq!(
+            result,
+            vec![(R(PauliRotation::new(new_axis("Y"), PiOver8(One))), 4),]
+        );
+    }
+
+    #[test]
     fn test_spc_compact_translation_one_qubit() {
+        use Angle::PiOver8;
+        use Mod8::*;
         use Operator::PauliRotation as R;
 
         let ops = vec![
-            R(PauliRotation::new_pi_over_8(new_axis("X"))),
-            R(PauliRotation::new_pi_over_8(new_axis("Y"))),
-            R(PauliRotation::new_pi_over_8(new_axis("X"))),
-            R(PauliRotation::new_pi_over_8(new_axis("X"))),
+            R(PauliRotation::new(new_axis("X"), PiOver8(One))),
+            R(PauliRotation::new(new_axis("Y"), PiOver8(Seven))),
+            R(PauliRotation::new(new_axis("X"), PiOver8(Seven))),
+            R(PauliRotation::new(new_axis("X"), PiOver8(One))),
         ];
 
         let result = spc_compact_translation(&ops);
         assert_eq!(
             result,
             vec![
-                (R(PauliRotation::new_pi_over_8(new_axis("X"))), 3),
-                (R(PauliRotation::new_pi_over_8(new_axis("Y"))), 4),
-                (R(PauliRotation::new_pi_over_8(new_axis("X"))), 3),
-                (R(PauliRotation::new_pi_over_8(new_axis("Z"))), 0),
+                (R(PauliRotation::new(new_axis("X"), PiOver8(One))), 3),
+                (R(PauliRotation::new(new_axis("Y"), PiOver8(One))), 4),
+                (R(PauliRotation::new(new_axis("X"), PiOver8(Seven))), 3),
+                (R(PauliRotation::new(new_axis("Z"), PiOver8(One))), 0),
             ]
         );
     }
 
     #[test]
     fn test_spc_compact_translation() {
+        use Angle::PiOver8;
+        use Mod8::*;
         use Operator::PauliRotation as R;
         let ops = vec![
-            R(PauliRotation::new_pi_over_8(new_axis("IIIXII"))),
-            R(PauliRotation::new_pi_over_8(new_axis("IIIXIZ"))),
-            R(PauliRotation::new_pi_over_8(new_axis("IIYYII"))),
-            R(PauliRotation::new_pi_over_8(new_axis("IXIIYX"))),
-            R(PauliRotation::new_pi_over_8(new_axis("XXXXXX"))),
-            R(PauliRotation::new_pi_over_8(new_axis("ZIIIIZ"))),
+            R(PauliRotation::new(new_axis("IIIXII"), PiOver8(One))),
+            R(PauliRotation::new(new_axis("IIIXIZ"), PiOver8(One))),
+            R(PauliRotation::new(new_axis("IIYYII"), PiOver8(One))),
+            R(PauliRotation::new(new_axis("IXIIYX"), PiOver8(One))),
+            R(PauliRotation::new(new_axis("XXXXXX"), PiOver8(One))),
+            R(PauliRotation::new(new_axis("ZIIIIZ"), PiOver8(One))),
         ];
 
         let result = spc_compact_translation(&ops);
         assert_eq!(
             result,
             vec![
-                (R(PauliRotation::new_pi_over_8(new_axis("IIIXII"))), 3),
-                (R(PauliRotation::new_pi_over_8(new_axis("IIIZIZ"))), 0),
-                (R(PauliRotation::new_pi_over_8(new_axis("IIYYII"))), 8),
-                (R(PauliRotation::new_pi_over_8(new_axis("IXIIYX"))), 7),
-                (R(PauliRotation::new_pi_over_8(new_axis("XZYXYZ"))), 8),
-                (R(PauliRotation::new_pi_over_8(new_axis("XIIIIX"))), 3),
+                (R(PauliRotation::new(new_axis("IIIXII"), PiOver8(One))), 3),
+                (R(PauliRotation::new(new_axis("IIIZIZ"), PiOver8(One))), 0),
+                (R(PauliRotation::new(new_axis("IIYYII"), -PiOver8(One))), 8),
+                (R(PauliRotation::new(new_axis("IXIIYX"), PiOver8(One))), 7),
+                (R(PauliRotation::new(new_axis("XZYXYZ"), PiOver8(One))), 8),
+                (R(PauliRotation::new(new_axis("XIIIIX"), PiOver8(One))), 3),
             ]
         );
     }

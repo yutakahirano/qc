@@ -19,9 +19,10 @@ struct Args {
     filename: String,
 }
 
-use pbc::Pauli;
-use pbc::Axis;
 use pbc::Angle;
+use pbc::Axis;
+use pbc::Mod8;
+use pbc::Pauli;
 use pbc::PauliRotation;
 
 struct Registers {
@@ -149,50 +150,56 @@ fn extract_classical_bit(
 // Extracts `s` as an angle.
 // The input is a QASM-style string, e.g., an argument for a RZ gate.
 // The output is in Litinski's style. This function accounts for the style difference,
-// so extract_angle(" pi / 2 ") returns Ok(Angle::PiOver4), for instance.
-//
-// Note also that we ignore the sign of the angle as long as it is a multiple of pi/8.
-// This is due to the following reasons:
-//   1. 0 == -0.
-//   2. pi == -pi mod 2pi.
-//   3. pi/2 and -pi/2 are equivalent, given Pauli operators are self-inverse.
-//   4. pi/4 and -pi/4 are equivalent, because P(pi/4) = P(pi/2) * P(-pi/4) = PP(-pi/4) where P is
-//      a Pauli operator. Pauli operators can be applied in the controlling classical computers
-//      with the feed-forward mechanism.
-//   5. Given that we use a magic state for a pi/8 rotation, a pi/8 rotation turns to a -pi/8
-//      rotation with a 1/2 probability. In that sense, pi/8 and -pi/8 are equivalent.
+// so extract_angle(" pi / 2 ") returns Ok(Angle::PiOver8(Two)), for instance.
 fn extract_angle(s: &str, context: &str) -> Result<Angle, String> {
-    let pattern = regex::Regex::new(r" pi */ *([0-9]+) *$").unwrap();
-    let minus_pattern = regex::Regex::new(r"^ * - *([0-9]+\.[0-9]+) *$").unwrap();
+    use Mod8::*;
+    let pattern =
+        regex::Regex::new(r"^ *(?<sign>-)? *((?<n>[0-9]+) *\*)? *pi *(/ *(?<m>[0-9]+))? *$")
+            .unwrap();
+    let arbitrary_angle_pattern =
+        regex::Regex::new(r"^ *(?<sign>-) *(?<a>[0-9]+\.[0-9]+) *$").unwrap();
     if s.trim() == "" {
         Err(format!("{}: angle must not be empty", context))
     } else if s.trim() == "0" {
-        Ok(Angle::Zero)
-    } else if s.trim() == "pi" || s.trim() == "-  pi" {
-        // This apparent inconsistency is intentional: see above.
-        Ok(Angle::PiOver2)
+        Ok(Angle::PiOver8(Zero))
     } else if let Some(caps) = pattern.captures(s) {
-        if caps.get(1).unwrap().as_str() == "2" {
-            Ok(Angle::PiOver4)
-        } else if caps.get(1).unwrap().as_str() == "4" {
-            Ok(Angle::PiOver8)
+        let has_minus = caps.name("sign").is_some();
+        let n = caps
+            .name("n")
+            .map_or(Ok(1), |n| n.as_str().parse::<u32>())
+            .map_err(|e| format!("{}: invalid angle: {}", context, e))?;
+        let m = caps
+            .name("m")
+            .map_or(Ok(1), |m| m.as_str().parse::<u32>())
+            .map_err(|e| format!("{}: invalid angle: {}", context, e))?;
+        let n_with_pi_over_8 = match m {
+            1 => 4 * n % 8,
+            2 => 2 * n % 8,
+            4 => n % 8,
+            _ => {
+                return Err(format!("{}: invalid angle: {}", context, s));
+            }
+        };
+        if has_minus {
+            Ok(Angle::PiOver8(-Mod8::from(n_with_pi_over_8)))
         } else {
-            Err(format!("{}: invalid angle: {}", context, s))
+            Ok(Angle::PiOver8(Mod8::from(n_with_pi_over_8)))
         }
-    } else if let Some(caps) = minus_pattern.captures(s) {
-        let angle = caps.get(1).unwrap().as_str().parse::<f64>();
-        if let Ok(angle) = angle {
-            Ok(Angle::Arbitrary(-angle))
+    } else if let Some(caps) = arbitrary_angle_pattern.captures(s) {
+        let sign = if caps.name("sign").is_some() {
+            -1.0
         } else {
-            Err(format!("{}: invalid angle: {}", context, s))
-        }
+            1.0
+        };
+        let a = caps
+            .name("a")
+            .unwrap()
+            .as_str()
+            .parse::<f64>()
+            .map_err(|e| format!("{}: invalid angle: {}", context, e))?;
+        Ok(Angle::Arbitrary(sign * a / 2.0))
     } else {
-        let angle = s.trim().parse::<f64>();
-        if let Ok(angle) = angle {
-            Ok(Angle::Arbitrary(angle))
-        } else {
-            Err(format!("{}: invalid angle: {}", context, s))
-        }
+        Err(format!("{}: invalid angle: {}", context, s))
     }
 }
 
@@ -205,10 +212,38 @@ fn translate_gate(
 ) -> Result<(), String> {
     use pbc::Operator::Measurement as M;
     use pbc::Operator::PauliRotation as R;
+    use Mod8::*;
     let num_qubits = registers.num_qubits();
     match name {
         "x" | "y" | "z" => {
-            // Pauli operators are dealt with classically.
+            if args.len() != 1 {
+                return Err(format!(
+                    "Invalid number of arguments for {}: {}",
+                    name,
+                    args.len()
+                ));
+            }
+            if !angle_args.is_empty() {
+                return Err(format!(
+                    "Invalid number of angle arguments for {}: {}",
+                    name,
+                    angle_args.len()
+                ));
+            }
+            let pauli = match name {
+                "x" => Pauli::X,
+                "y" => Pauli::Y,
+                "z" => Pauli::Z,
+                _ => unreachable!(),
+            };
+            output.push(R(PauliRotation::new(
+                Axis::new_with_pauli(
+                    extract_qubit(args, 0, registers, name)? as usize,
+                    num_qubits as usize,
+                    pauli,
+                ),
+                Angle::PiOver8(Four),
+            )));
             return Ok(());
         }
         "rz" => {
@@ -226,7 +261,7 @@ fn translate_gate(
             }
             let qubit = extract_qubit(args, 0, registers, "rz")?;
             let angle = extract_angle(&angle_args[0], "rz")?;
-            if angle != Angle::Zero && angle != Angle::PiOver2 {
+            if angle != Angle::PiOver8(Zero) {
                 let axis = Axis::new_with_pauli(qubit as usize, num_qubits as usize, Pauli::Z);
                 output.push(R(PauliRotation::new(axis, angle)));
             }
@@ -246,7 +281,7 @@ fn translate_gate(
             }
             let qubit = extract_qubit(args, 0, registers, "ry")?;
             let angle = extract_angle(&angle_args[0], "ry")?;
-            if angle != Angle::Zero && angle != Angle::PiOver2 {
+            if angle != Angle::PiOver8(Zero) {
                 let axis = Axis::new_with_pauli(qubit as usize, num_qubits as usize, Pauli::Y);
                 output.push(R(PauliRotation::new(axis, angle)));
             }
@@ -266,7 +301,7 @@ fn translate_gate(
             }
             let qubit = extract_qubit(args, 0, registers, "sx")?;
             let axis = Axis::new_with_pauli(qubit as usize, num_qubits as usize, Pauli::X);
-            output.push(R(PauliRotation::new_clifford(axis)));
+            output.push(R(PauliRotation::new(axis, Angle::PiOver8(Two))));
         }
         "h" => {
             if args.len() != 1 {
@@ -278,14 +313,13 @@ fn translate_gate(
                     angle_args.len()
                 ));
             }
-            let qubit = extract_qubit(args, 0, registers, "sx")?;
-            let mut axis_x = vec![Pauli::I; num_qubits as usize];
-            axis_x[qubit as usize] = Pauli::X;
-            let mut axis_z = vec![Pauli::I; num_qubits as usize];
-            axis_z[qubit as usize] = Pauli::X;
-            output.push(R(PauliRotation::new_clifford(Axis::new(axis_z.clone()))));
-            output.push(R(PauliRotation::new_clifford(Axis::new(axis_x))));
-            output.push(R(PauliRotation::new_clifford(Axis::new(axis_z))));
+            let qubit = extract_qubit(args, 0, registers, "h")?;
+            let axis_x = Axis::new_with_pauli(qubit as usize, num_qubits as usize, Pauli::X);
+            let axis_z = Axis::new_with_pauli(qubit as usize, num_qubits as usize, Pauli::Z);
+            // H = S * S_x * S
+            output.push(R(PauliRotation::new(axis_z.clone(), Angle::PiOver8(Two))));
+            output.push(R(PauliRotation::new(axis_x, Angle::PiOver8(Two))));
+            output.push(R(PauliRotation::new(axis_z, Angle::PiOver8(Two))));
         }
         "cx" => {
             if args.len() != 2 {
@@ -305,18 +339,16 @@ fn translate_gate(
             if control == target {
                 return Err("cx: control and target must be different".to_string());
             }
-            let mut axis = vec![Pauli::I; num_qubits as usize];
-            axis[control as usize] = Pauli::Z;
-            output.push(R(PauliRotation::new_clifford(Axis::new(axis))));
+            let axis = Axis::new_with_pauli(control as usize, num_qubits as usize, Pauli::Z);
+            output.push(R(PauliRotation::new(axis, -Angle::PiOver8(Two))));
 
-            let mut axis = vec![Pauli::I; num_qubits as usize];
-            axis[target as usize] = Pauli::X;
-            output.push(R(PauliRotation::new_clifford(Axis::new(axis))));
+            let axis = Axis::new_with_pauli(target as usize, num_qubits as usize, Pauli::X);
+            output.push(R(PauliRotation::new(axis, -Angle::PiOver8(Two))));
 
             let mut axis = vec![Pauli::I; num_qubits as usize];
             axis[control as usize] = Pauli::Z;
             axis[target as usize] = Pauli::X;
-            output.push(R(PauliRotation::new_clifford(Axis::new(axis))));
+            output.push(R(PauliRotation::new(Axis::new(axis), Angle::PiOver8(Two))));
         }
         "measure" => {
             if args.len() != 2 {
@@ -472,16 +504,19 @@ fn extract(nodes: &[qasm::AstNode]) -> Option<(Vec<PauliRotation>, Registers)> {
     );
 
     let result = pbc::spc_translation(&ops);
-    let cliffords = ops.iter().filter_map(|op| match op {
-        pbc::Operator::PauliRotation(r) => {
-            if r.is_clifford() {
-                Some(r.clone())
-            } else {
-                None
+    let cliffords = ops
+        .iter()
+        .filter_map(|op| match op {
+            pbc::Operator::PauliRotation(r) => {
+                if r.is_clifford() {
+                    Some(r.clone())
+                } else {
+                    None
+                }
             }
-        }
-        _ => None,
-    }).collect::<Vec<_>>();
+            _ => None,
+        })
+        .collect::<Vec<_>>();
 
     let num_qubits = match &result[0] {
         pbc::Operator::PauliRotation(r) => r.axis.len(),
@@ -489,20 +524,26 @@ fn extract(nodes: &[qasm::AstNode]) -> Option<(Vec<PauliRotation>, Registers)> {
     };
     // Print logical operators.
     for i in 0..num_qubits {
-        let mut a = Axis::new(vec![Pauli::I; num_qubits]);
-        a[i] = Pauli::X;
+        let mut r = PauliRotation::new(
+            Axis::new(vec![Pauli::I; num_qubits]),
+            Angle::PiOver8(Mod8::Four),
+        );
+        r.axis[i] = Pauli::X;
         for c in cliffords.iter().rev() {
-            a.transform(&c.axis);
+            r.transform(c);
         }
-        let line = format!("X{:0>3} => {}", i, a);
+        let line = format!("X{:0>3} => {}", i, r.axis);
         print_line_potentially_with_colors(&line);
 
-        let mut a = Axis::new(vec![Pauli::I; num_qubits]);
-        a[i] = Pauli::Z;
+        let mut r = PauliRotation::new(
+            Axis::new(vec![Pauli::I; num_qubits]),
+            Angle::PiOver8(Mod8::Four),
+        );
+        r.axis[i] = Pauli::Z;
         for c in cliffords.iter().rev() {
-            a.transform(&c.axis);
+            r.transform(c);
         }
-        let line = format!("Z{:0>3} => {}", i, a);
+        let line = format!("Z{:0>3} => {}", i, r.axis);
         print_line_potentially_with_colors(&line);
     }
 
@@ -522,7 +563,6 @@ fn extract(nodes: &[qasm::AstNode]) -> Option<(Vec<PauliRotation>, Registers)> {
         write!(&mut out, "{:>4} {:} (+{})", i, op, clocks).unwrap();
         print_line_potentially_with_colors(&out);
     }
-
 
     None
 }
@@ -577,250 +617,311 @@ mod tests {
 
     #[test]
     fn test_extract_angle() {
-        assert_eq!(extract_angle("0", "test"), Ok(Angle::Zero));
+        use Angle::*;
+        use Mod8::*;
+        assert_eq!(extract_angle("0", "test"), Ok(PiOver8(Zero)));
         assert_eq!(
             extract_angle("", "test"),
             Err("test: angle must not be empty".to_string())
         );
-        assert_eq!(extract_angle(" pi ", "test"), Ok(Angle::PiOver2));
-        // We expect a space before "pi".
-        assert_eq!(
-            extract_angle("pi / 2 ", "test"),
-            Err("test: invalid angle: pi / 2 ".to_string())
-        );
-        assert_eq!(extract_angle(" pi / 2 ", "test"), Ok(Angle::PiOver4));
-        assert_eq!(extract_angle("- pi / 2 ", "test"), Ok(Angle::PiOver4));
-        assert_eq!(extract_angle(" pi / 4 ", "test"), Ok(Angle::PiOver8));
+        assert_eq!(extract_angle(" pi ", "test"), Ok(PiOver8(Four)));
+        assert_eq!(extract_angle(" pi  /  2 ", "test"), Ok(PiOver8(Two)));
+        assert_eq!(extract_angle(" -  pi  /  2 ", "test"), Ok(-PiOver8(Two)));
+        assert_eq!(extract_angle(" pi / 4 ", "test"), Ok(PiOver8(One)));
+        assert_eq!(extract_angle(" 3 * pi / 4 ", "test"), Ok(PiOver8(Three)));
+        assert_eq!(extract_angle(" - 3 * pi / 4 ", "test"), Ok(-PiOver8(Three)));
         assert_eq!(
             extract_angle(" pi / 8 ", "test"),
             Err("test: invalid angle:  pi / 8 ".to_string())
         );
-        assert_eq!(extract_angle("-1.25", "test"), Ok(Angle::Arbitrary(-1.25)));
+        assert_eq!(extract_angle("-1.25", "test"), Ok(-Angle::Arbitrary(0.625)));
     }
 
     #[test]
     fn test_translate_pauli() {
-        let mut ops = Vec::new();
+        use pbc::Operator::PauliRotation as R;
+        use Angle::*;
+        use Mod8::*;
         let args = vec![Argument::Qubit("q".to_string(), 1)];
         let regs = new_qregs(4);
         let angle_args = Vec::new();
         {
+            let mut ops = Vec::new();
             translate_gate("x", &args, &angle_args, &regs, &mut ops).unwrap();
-            assert_eq!(ops.len(), 0);
+            assert_eq!(
+                ops,
+                vec![R(PauliRotation::new(new_axis("IXII"), PiOver8(Four)))]
+            );
         }
 
         {
+            let mut ops = Vec::new();
             translate_gate("y", &args, &angle_args, &regs, &mut ops).unwrap();
-            assert_eq!(ops.len(), 0);
+            assert_eq!(
+                ops,
+                vec![R(PauliRotation::new(new_axis("IYII"), PiOver8(Four)))]
+            );
         }
 
         {
+            let mut ops = Vec::new();
             translate_gate("z", &args, &angle_args, &regs, &mut ops).unwrap();
-            assert_eq!(ops.len(), 0);
+            assert_eq!(
+                ops,
+                vec![R(PauliRotation::new(new_axis("IZII"), PiOver8(Four)))]
+            );
         }
     }
 
     #[test]
     fn test_translate_ry() {
         use pbc::Operator::PauliRotation as R;
-        let mut ops = Vec::new();
-        let args = vec![Argument::Qubit("q".to_string(), 2)];
-        let angle_args = vec![" 3 * pi / 4 ".to_string()];
+        use Angle::*;
+        use Mod8::*;
+        let args = [Argument::Qubit("q".to_string(), 2)];
+        let angle_args = [" 3 * pi / 4 ".to_string()];
         let regs = new_qregs(4);
 
         {
+            let mut ops = Vec::new();
             translate_gate("ry", &args, &angle_args, &regs, &mut ops).unwrap();
-            assert_eq!(ops.len(), 1);
-            assert_eq!(ops[0], R(PauliRotation::new_pi_over_8(new_axis("IIYI"))));
+            assert_eq!(
+                ops,
+                vec![R(PauliRotation::new(new_axis("IIYI"), PiOver8(Three))),]
+            );
         }
 
         {
-            let args = vec![];
+            let mut ops = Vec::new();
+            let args = [];
             let r = translate_gate("ry", &args, &angle_args, &regs, &mut ops);
             assert_eq!(r, Err("Invalid number of arguments for ry: 0".to_string()));
-            assert_eq!(ops.len(), 1);
+            assert!(ops.is_empty());
         }
 
         {
-            let args = vec![
+            let mut ops = Vec::new();
+            let args = [
                 Argument::Qubit("q".to_string(), 1),
                 Argument::Qubit("q".to_string(), 2),
             ];
             let r = translate_gate("ry", &args, &angle_args, &regs, &mut ops);
             assert_eq!(r, Err("Invalid number of arguments for ry: 2".to_string()));
-            assert_eq!(ops.len(), 1);
+            assert!(ops.is_empty());
         }
 
         {
-            let angle_args = vec!["0".to_string()];
-            translate_gate("ry", &args, &angle_args, &regs, &mut ops).unwrap();
-            assert_eq!(ops.len(), 1);
-            assert_eq!(ops[0], R(PauliRotation::new_pi_over_8(new_axis("IIYI"))));
+            let mut ops = Vec::new();
+            let angle_args = ["0".to_string()];
+            assert!(translate_gate("ry", &args, &angle_args, &regs, &mut ops).is_ok());
+            assert!(ops.is_empty());
         }
 
         {
-            let angle_args = vec!["pi".to_string()];
-            translate_gate("ry", &args, &angle_args, &regs, &mut ops).unwrap();
-            assert_eq!(ops.len(), 1);
-            assert_eq!(ops[0], R(PauliRotation::new_pi_over_8(new_axis("IIYI"))));
-        }
-
-        {
-            let angle_args = vec!["- pi / 2".to_string()];
-            translate_gate("ry", &args, &angle_args, &regs, &mut ops).unwrap();
-            assert_eq!(ops.len(), 2);
-            assert_eq!(ops[1], R(PauliRotation::new_clifford(new_axis("IIYI"))));
-        }
-
-        {
-            let angle_args = vec![];
-            let r = translate_gate("ry", &args, &angle_args, &regs, &mut ops);
+            let mut ops = Vec::new();
+            let angle_args = ["pi".to_string()];
+            assert!(translate_gate("ry", &args, &angle_args, &regs, &mut ops).is_ok());
             assert_eq!(
-                r,
+                ops,
+                vec![R(PauliRotation::new(new_axis("IIYI"), PiOver8(Four))),]
+            );
+        }
+
+        {
+            let mut ops = Vec::new();
+            let angle_args = ["- pi / 2".to_string()];
+            assert!(translate_gate("ry", &args, &angle_args, &regs, &mut ops).is_ok());
+            assert_eq!(
+                ops,
+                vec![R(PauliRotation::new(new_axis("IIYI"), -PiOver8(Two))),]
+            );
+        }
+
+        {
+            let mut ops = Vec::new();
+            let angle_args = [];
+            assert_eq!(
+                translate_gate("ry", &args, &angle_args, &regs, &mut ops),
                 Err("Invalid number of angle arguments for ry: 0".to_string())
             );
-            assert_eq!(ops.len(), 2);
+            assert!(ops.is_empty());
         }
 
         {
-            let angle_args = vec!["0".to_string(), "0".to_string()];
-            let r = translate_gate("ry", &args, &angle_args, &regs, &mut ops);
+            let mut ops = Vec::new();
+            let angle_args = ["0".to_string(), "0".to_string()];
             assert_eq!(
-                r,
+                translate_gate("ry", &args, &angle_args, &regs, &mut ops),
                 Err("Invalid number of angle arguments for ry: 2".to_string())
             );
-            assert_eq!(ops.len(), 2);
+            assert!(ops.is_empty());
         }
+
         {
-            let args = vec![Argument::Qubit("q".to_string(), 4)];
-            let r = translate_gate("ry", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(r, Err("ry: there is no qubit q[4]".to_string()));
-            assert_eq!(ops.len(), 2);
+            let mut ops = Vec::new();
+            let args = [Argument::Qubit("q".to_string(), 4)];
+            assert_eq!(
+                translate_gate("ry", &args, &angle_args, &regs, &mut ops),
+                Err("ry: there is no qubit q[4]".to_string())
+            );
+            assert!(ops.is_empty());
         }
     }
 
     #[test]
     fn test_translate_rz() {
         use pbc::Operator::PauliRotation as R;
-        let mut ops = Vec::new();
-        let args = vec![Argument::Qubit("q".to_string(), 2)];
-        let angle_args = vec![" 3 * pi / 4 ".to_string()];
+        use Angle::*;
+        use Mod8::*;
+        let args = [Argument::Qubit("q".to_string(), 2)];
+        let angle_args = vec![" - 5 * pi / 4 ".to_string()];
         let regs = new_qregs(4);
 
         {
-            translate_gate("rz", &args, &angle_args, &regs, &mut ops).unwrap();
-            assert_eq!(ops.len(), 1);
-            assert_eq!(ops[0], R(PauliRotation::new_pi_over_8(new_axis("IIZI"))));
+            let mut ops = Vec::new();
+            assert!(translate_gate("rz", &args, &angle_args, &regs, &mut ops).is_ok());
+            assert_eq!(
+                ops,
+                vec![R(PauliRotation::new(new_axis("IIZI"), -PiOver8(Five))),]
+            );
         }
 
         {
-            let args = vec![];
-            let r = translate_gate("rz", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(r, Err("Invalid number of arguments for rz: 0".to_string()));
-            assert_eq!(ops.len(), 1);
+            let mut ops = Vec::new();
+            let args = [];
+            assert_eq!(
+                translate_gate("rz", &args, &angle_args, &regs, &mut ops),
+                Err("Invalid number of arguments for rz: 0".to_string())
+            );
+            assert!(ops.is_empty());
         }
 
         {
-            let args = vec![
+            let mut ops = Vec::new();
+            let args = [
                 Argument::Qubit("q".to_string(), 1),
                 Argument::Qubit("q".to_string(), 2),
             ];
-            let r = translate_gate("rz", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(r, Err("Invalid number of arguments for rz: 2".to_string()));
-            assert_eq!(ops.len(), 1);
-        }
-
-        {
-            let angle_args = vec!["0".to_string()];
-            translate_gate("rz", &args, &angle_args, &regs, &mut ops).unwrap();
-            assert_eq!(ops.len(), 1);
-            assert_eq!(ops[0], R(PauliRotation::new_pi_over_8(new_axis("IIZI"))));
-        }
-
-        {
-            let angle_args = vec!["pi".to_string()];
-            translate_gate("rz", &args, &angle_args, &regs, &mut ops).unwrap();
-            assert_eq!(ops.len(), 1);
-            assert_eq!(ops[0], R(PauliRotation::new_pi_over_8(new_axis("IIZI"))));
-        }
-
-        {
-            let angle_args = vec!["- pi / 2".to_string()];
-            translate_gate("rz", &args, &angle_args, &regs, &mut ops).unwrap();
-            assert_eq!(ops.len(), 2);
-            assert_eq!(ops[1], R(PauliRotation::new_clifford(new_axis("IIZI"))));
-        }
-
-        {
-            let angle_args = vec![];
-            let r = translate_gate("rz", &args, &angle_args, &regs, &mut ops);
             assert_eq!(
-                r,
+                translate_gate("rz", &args, &angle_args, &regs, &mut ops),
+                Err("Invalid number of arguments for rz: 2".to_string())
+            );
+            assert!(ops.is_empty());
+        }
+
+        {
+            let mut ops = Vec::new();
+            let angle_args = ["0".to_string()];
+            assert!(translate_gate("rz", &args, &angle_args, &regs, &mut ops).is_ok());
+            assert!(ops.is_empty());
+        }
+
+        {
+            let mut ops = Vec::new();
+            let angle_args = ["pi".to_string()];
+            assert!(translate_gate("rz", &args, &angle_args, &regs, &mut ops).is_ok());
+            assert_eq!(
+                ops,
+                vec![R(PauliRotation::new(new_axis("IIZI"), PiOver8(Four)))]
+            );
+        }
+
+        {
+            let mut ops = Vec::new();
+            let angle_args = ["- pi / 2".to_string()];
+            assert!(translate_gate("rz", &args, &angle_args, &regs, &mut ops).is_ok());
+            assert_eq!(
+                ops,
+                vec![R(PauliRotation::new(new_axis("IIZI"), -PiOver8(Two)))]
+            );
+        }
+
+        {
+            let mut ops = Vec::new();
+            let angle_args = [];
+            assert_eq!(
+                translate_gate("rz", &args, &angle_args, &regs, &mut ops),
                 Err("Invalid number of angle arguments for rz: 0".to_string())
             );
-            assert_eq!(ops.len(), 2);
+            assert!(ops.is_empty());
         }
 
         {
-            let angle_args = vec!["0".to_string(), "0".to_string()];
-            let r = translate_gate("rz", &args, &angle_args, &regs, &mut ops);
+            let mut ops = Vec::new();
+            let angle_args = ["0".to_string(), "0".to_string()];
             assert_eq!(
-                r,
+                translate_gate("rz", &args, &angle_args, &regs, &mut ops),
                 Err("Invalid number of angle arguments for rz: 2".to_string())
             );
-            assert_eq!(ops.len(), 2);
+            assert!(ops.is_empty());
         }
+
         {
-            let args = vec![Argument::Qubit("q".to_string(), 4)];
-            let r = translate_gate("rz", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(r, Err("rz: there is no qubit q[4]".to_string()));
-            assert_eq!(ops.len(), 2);
+            let mut ops = Vec::new();
+            let args = [Argument::Qubit("q".to_string(), 4)];
+            assert_eq!(
+                translate_gate("rz", &args, &angle_args, &regs, &mut ops),
+                Err("rz: there is no qubit q[4]".to_string())
+            );
+            assert!(ops.is_empty());
         }
     }
 
     #[test]
-    fn test_translate_sx() {
+    fn test_translate_h() {
         use pbc::Operator::PauliRotation as R;
-        let mut ops = Vec::new();
-        let args = vec![Argument::Qubit("q".to_string(), 1)];
+        use Angle::*;
+        use Mod8::*;
+        let args = [Argument::Qubit("q".to_string(), 1)];
         let regs = new_qregs(4);
         let angle_args = Vec::new();
         {
-            translate_gate("sx", &args, &angle_args, &regs, &mut ops).unwrap();
-            assert_eq!(ops.len(), 1);
-            assert_eq!(ops[0], R(PauliRotation::new_clifford(new_axis("IXII"))));
+            let mut ops = Vec::new();
+            assert!(translate_gate("h", &args, &angle_args, &regs, &mut ops).is_ok());
+            assert_eq!(
+                ops,
+                vec![
+                    R(PauliRotation::new(new_axis("IZII"), PiOver8(Two))),
+                    R(PauliRotation::new(new_axis("IXII"), PiOver8(Two))),
+                    R(PauliRotation::new(new_axis("IZII"), PiOver8(Two)))
+                ]
+            );
         }
         {
+            let mut ops = Vec::new();
             let args = vec![];
-            let r = translate_gate("sx", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(r, Err("Invalid number of arguments for sx: 0".to_string()));
-            assert_eq!(ops.len(), 1);
+            let r = translate_gate("h", &args, &angle_args, &regs, &mut ops);
+            assert_eq!(r, Err("Invalid number of arguments for h: 0".to_string()));
+            assert!(ops.is_empty());
         }
 
         {
+            let mut ops = Vec::new();
             let args = vec![
                 Argument::Qubit("q".to_string(), 1),
                 Argument::Qubit("q".to_string(), 2),
             ];
-            let r = translate_gate("sx", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(r, Err("Invalid number of arguments for sx: 2".to_string()));
-            assert_eq!(ops.len(), 1);
+            let r = translate_gate("h", &args, &angle_args, &regs, &mut ops);
+            assert_eq!(r, Err("Invalid number of arguments for h: 2".to_string()));
+            assert!(ops.is_empty());
         }
 
         {
+            let mut ops = Vec::new();
             let angle_args = vec!["0".to_string()];
-            let r = translate_gate("sx", &args, &angle_args, &regs, &mut ops);
+            let r = translate_gate("h", &args, &angle_args, &regs, &mut ops);
             assert_eq!(
                 r,
-                Err("Invalid number of angle arguments for sx: 1".to_string())
+                Err("Invalid number of angle arguments for h: 1".to_string())
             );
-            assert_eq!(ops.len(), 1);
+            assert!(ops.is_empty());
         }
         {
+            let mut ops = Vec::new();
             let args = vec![Argument::Qubit("q".to_string(), 4)];
-            let r = translate_gate("sx", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(r, Err("sx: there is no qubit q[4]".to_string()));
-            assert_eq!(ops.len(), 1);
+            let r = translate_gate("h", &args, &angle_args, &regs, &mut ops);
+            assert_eq!(r, Err("h: there is no qubit q[4]".to_string()));
+            assert!(ops.is_empty());
         }
     }
 
@@ -925,8 +1026,9 @@ mod tests {
     #[test]
     fn test_translate_cx() {
         use pbc::Operator::PauliRotation as R;
-        let mut ops = Vec::new();
-        let args = vec![
+        use Angle::*;
+        use Mod8::*;
+        let args = [
             Argument::Qubit("q".to_string(), 1),
             Argument::Qubit("q".to_string(), 3),
         ];
@@ -934,73 +1036,89 @@ mod tests {
         let angle_args = Vec::new();
 
         {
-            translate_gate("cx", &args, &angle_args, &regs, &mut ops).unwrap();
-            assert_eq!(ops.len(), 3);
-            assert_eq!(ops[0], R(PauliRotation::new_clifford(new_axis("IZII"))));
-            assert_eq!(ops[1], R(PauliRotation::new_clifford(new_axis("IIIX"))));
-            assert_eq!(ops[2], R(PauliRotation::new_clifford(new_axis("IZIX"))));
+            let mut ops = Vec::new();
+            assert!(translate_gate("cx", &args, &angle_args, &regs, &mut ops).is_ok());
+            assert_eq!(
+                ops,
+                vec![
+                    R(PauliRotation::new(new_axis("IZII"), -PiOver8(Two))),
+                    R(PauliRotation::new(new_axis("IIIX"), -PiOver8(Two))),
+                    R(PauliRotation::new(new_axis("IZIX"), PiOver8(Two))),
+                ]
+            );
         }
 
         {
+            let mut ops = Vec::new();
             let args = vec![Argument::Qubit("q".to_string(), 1)];
-            let r = translate_gate("cx", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(r, Err("Invalid number of arguments for cx: 1".to_string()));
-
-            assert_eq!(ops.len(), 3);
+            assert_eq!(
+                translate_gate("cx", &args, &angle_args, &regs, &mut ops),
+                Err("Invalid number of arguments for cx: 1".to_string())
+            );
+            assert!(ops.is_empty());
         }
 
         {
-            let args = vec![
+            let mut ops = Vec::new();
+            let args = [
                 Argument::Qubit("q".to_string(), 1),
                 Argument::Qubit("q".to_string(), 2),
                 Argument::Qubit("q".to_string(), 3),
             ];
-            let r = translate_gate("cx", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(r, Err("Invalid number of arguments for cx: 3".to_string()));
-
-            assert_eq!(ops.len(), 3);
+            assert_eq!(
+                translate_gate("cx", &args, &angle_args, &regs, &mut ops),
+                Err("Invalid number of arguments for cx: 3".to_string())
+            );
+            assert!(ops.is_empty());
         }
 
         {
-            let angle_args = vec!["0".to_string()];
-            let r = translate_gate("cx", &args, &angle_args, &regs, &mut ops);
+            let mut ops = Vec::new();
+            let angle_args = ["0".to_string()];
             assert_eq!(
-                r,
+                translate_gate("cx", &args, &angle_args, &regs, &mut ops),
                 Err("Invalid number of angle arguments for cx: 1".to_string())
             );
-            assert_eq!(ops.len(), 3);
+            assert!(ops.is_empty());
         }
+
         {
-            let args = vec![
+            let mut ops = Vec::new();
+            let args = [
                 Argument::Qubit("q".to_string(), 4),
                 Argument::Qubit("q".to_string(), 3),
             ];
-            let r = translate_gate("cx", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(r, Err("cx: there is no qubit q[4]".to_string()));
-            assert_eq!(ops.len(), 3);
+            assert_eq!(
+                translate_gate("cx", &args, &angle_args, &regs, &mut ops),
+                Err("cx: there is no qubit q[4]".to_string())
+            );
+            assert!(ops.is_empty());
         }
 
         {
-            let args = vec![
+            let mut ops = Vec::new();
+            let args = [
                 Argument::Qubit("q".to_string(), 1),
                 Argument::Qubit("q".to_string(), 4),
             ];
-            let r = translate_gate("cx", &args, &angle_args, &regs, &mut ops);
-            assert_eq!(r, Err("cx: there is no qubit q[4]".to_string()));
-            assert_eq!(ops.len(), 3);
+            assert_eq!(
+                translate_gate("cx", &args, &angle_args, &regs, &mut ops),
+                Err("cx: there is no qubit q[4]".to_string())
+            );
+            assert!(ops.is_empty());
         }
 
         {
-            let args = vec![
+            let mut ops = Vec::new();
+            let args = [
                 Argument::Qubit("q".to_string(), 1),
                 Argument::Qubit("q".to_string(), 1),
             ];
-            let r = translate_gate("cx", &args, &angle_args, &regs, &mut ops);
             assert_eq!(
-                r,
+                translate_gate("cx", &args, &angle_args, &regs, &mut ops),
                 Err("cx: control and target must be different".to_string())
             );
-            assert_eq!(ops.len(), 3);
+            assert!(ops.is_empty());
         }
     }
 
