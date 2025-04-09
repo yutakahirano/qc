@@ -3,6 +3,17 @@ import pymatching
 import stim
 
 
+def calculate_weight(syndrome: np.ndarray, matcher: pymatching.Matching) -> float:
+    all_edges = matcher.edges()
+    weight = 0
+    for [x, y] in matcher.decode_to_edges_array(syndrome):
+        y = None if y == -1 else y
+        ls = [attr['weight'] for (u, v, attr) in all_edges if (u == x and v == y) or (u == y and v == x)]
+        assert len(ls) == 1
+        weight += ls[0]
+    return weight
+
+
 def main() -> None:
     num_shots = 1000
     circuit: stim.Circuit
@@ -17,25 +28,11 @@ def main() -> None:
 
     for shot in range(num_shots):
         syndrome = detection_events[shot]
-        weight = 0
-        for [x, y] in matcher.decode_to_edges_array(syndrome):
-            y = None if y == -1 else y
-            ls = [attr['weight'] for (u, v, attr) in all_edges if (u == x and v == y) or (u == y and v == x)]
-            assert len(ls) == 1
-            weight += ls[0]
+        weight = calculate_weight(syndrome, matcher)
 
-        complementary_weight = 0
-
-        # Flip the last detector.
         syndrome[-1] = 1 - syndrome[-1]
-        edges = matcher.decode_to_edges_array(syndrome)
+        complementary_weight = calculate_weight(syndrome, matcher)
         syndrome[-1] = 1 - syndrome[-1]
-
-        for [x, y] in edges:
-            y = None if y == -1 else y
-            ls = [attr['weight'] for (u, v, attr) in all_edges if (u == x and v == y) or (u == y and v == x)]
-            assert len(ls) == 1
-            complementary_weight += ls[0]
 
         gap = complementary_weight - weight
         print('weight = {:8.3f}, complementary_weight = {:8.3f}, gap = {:8.3f}'.format(
