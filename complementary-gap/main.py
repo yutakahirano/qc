@@ -8,7 +8,7 @@ def calculate_weight(syndrome: np.ndarray, matcher: pymatching.Matching) -> floa
     weight = 0
     for [x, y] in matcher.decode_to_edges_array(syndrome):
         y = None if y == -1 else y
-        ls = [attr['weight'] for (u, v, attr) in all_edges if (u == x and v == y) or (u == y and v == x)]
+        ls = [attr['weight'] for (u, v, attr) in all_edges if (u, v) == (x, y) or (u, v) == (y, x)]
         assert len(ls) == 1
         weight += ls[0]
     return weight
