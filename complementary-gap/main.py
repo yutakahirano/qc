@@ -23,7 +23,6 @@ def main() -> None:
     sampler = circuit.compile_detector_sampler()
 
     detection_events, observable_flips = sampler.sample(num_shots, separate_observables=True)
-    all_edges = matcher.edges()
 
     for shot in range(num_shots):
         syndrome = detection_events[shot]
