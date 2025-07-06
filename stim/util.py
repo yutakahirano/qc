@@ -87,11 +87,8 @@ class Circuit:
         self.circuit = stim.Circuit()
         for id, (x, y) in mapping.mapping:
             self.circuit.append('QUBIT_COORDS', id, (x, y))
+        self.noiseless_qubits: list[int] = []
         self.tainted_qubits: list[int] = []
-        self.num_z0246_syndrome_measurements = 0
-        self.num_z0235_syndrome_measurements = 0
-        self.num_z0145_syndrome_measurements = 0
-        self.measurements: dict[int, int] = {}
         self.detectors_for_post_selection: list[DetectorIdentifier] = []
 
     def place_tick(self) -> None:
@@ -99,6 +96,8 @@ class Circuit:
         if self.error_probability > 0:
             for id, (x, y) in self.mapping.mapping:
                 if id in self.tainted_qubits:
+                    continue
+                if id in self.noiseless_qubits:
                     continue
                 self.circuit.append('DEPOLARIZE1', id, self.error_probability)
         self.tainted_qubits.clear()
@@ -118,13 +117,19 @@ class Circuit:
         '''
         return self.mapping.get_id(x, y) in self.tainted_qubits
 
+    def mark_qubits_as_noiseless(self, qubit_positions: list[tuple[int, int]]) -> None:
+        '''\
+        Marks the specified qubits as noiseless.
+        '''
+        self.noiseless_qubits = [self.mapping.get_id(*pos) for pos in qubit_positions]
+
     def place_single_qubit_gate(self, gate: str, target_position: tuple[int, int]) -> None:
         '''Places a single-qubit unitary gate `gate`.'''
         target = self.mapping.get_id(*target_position)
         if target in self.tainted_qubits:
             raise ValueError(f'Cannot place {gate} gate on tainted qubit.')
         self.circuit.append(gate, target)
-        if self.error_probability > 0:
+        if target not in self.noiseless_qubits and self.error_probability > 0:
             self.circuit.append('DEPOLARIZE1', target, self.error_probability)
         self.tainted_qubits.append(target)
 
@@ -139,7 +144,14 @@ class Circuit:
             raise ValueError(f'Cannot place CX gate on tainted qubits.')
         self.circuit.append('CX', (control, target))
         if self.error_probability > 0:
-            self.circuit.append('DEPOLARIZE2', [control, target], self.error_probability)
+            if control in self.noiseless_qubits and target in self.noiseless_qubits:
+                pass
+            elif control in self.noiseless_qubits:
+                self.circuit.append('DEPOLARIZE1', [target], self.error_probability)
+            elif target in self.noiseless_qubits:
+                self.circuit.append('DEPOLARIZE1', [control], self.error_probability)
+            else:
+                self.circuit.append('DEPOLARIZE2', [control, target], self.error_probability)
         self.tainted_qubits.append(control)
         self.tainted_qubits.append(target)
 
@@ -149,7 +161,7 @@ class Circuit:
         if target in self.tainted_qubits:
             raise ValueError(f'Cannot place reset Z gate on tainted qubit.')
         self.circuit.append('R', target)
-        if self.error_probability > 0:
+        if target not in self.noiseless_qubits and self.error_probability > 0:
             self.circuit.append('X_ERROR', target, self.error_probability)
         self.tainted_qubits.append(target)
 
@@ -159,7 +171,7 @@ class Circuit:
         if target in self.tainted_qubits:
             raise ValueError(f'Cannot place reset X gate on tainted qubit.')
         self.circuit.append('RX', target)
-        if self.error_probability > 0:
+        if target not in self.noiseless_qubits and self.error_probability > 0:
             self.circuit.append('Z_ERROR', target, self.error_probability)
         self.tainted_qubits.append(target)
 
@@ -168,10 +180,9 @@ class Circuit:
         target = self.mapping.get_id(*target_position)
         if target in self.tainted_qubits:
             raise ValueError(f'Cannot place measurement Z gate on tainted qubit.')
-        if self.error_probability > 0:
+        if target not in self.noiseless_qubits and self.error_probability > 0:
             self.circuit.append('X_ERROR', target, self.error_probability)
 
-        m: int | None = self.measurements[target] if target in self.measurements else None
         self.circuit.append('M', target)
         self.tainted_qubits.append(target)
         return MeasurementIdentifier(self.circuit.num_measurements - 1)
@@ -181,20 +192,167 @@ class Circuit:
         target = self.mapping.get_id(*target_position)
         if target in self.tainted_qubits:
             raise ValueError(f'Cannot place measurement X gate on tainted qubit.')
-        if self.error_probability > 0:
+        if target not in self.noiseless_qubits and self.error_probability > 0:
             self.circuit.append('Z_ERROR', target, self.error_probability)
         self.circuit.append('MX', target)
         self.tainted_qubits.append(target)
         return MeasurementIdentifier(self.circuit.num_measurements - 1)
 
-    def place_detector(self, measurements: list[MeasurementIdentifier], post_selection: bool = False) -> None:
+    def place_mpp(self, target: stim.PauliString) -> MeasurementIdentifier:
+        '''Places a multi-qubit Pauli product measurement, and returns the measurement ID.'''
+        for (i, p) in enumerate(target):
+            if p == 0:
+                continue
+            if i in self.tainted_qubits:
+                raise ValueError(f'Cannot place MPP gate on tainted qubit {i}.')
+        for (i, p) in enumerate(target):
+            if p == 0:
+                continue
+            self.tainted_qubits.append(i)
+            if i in self.noiseless_qubits or self.error_probability == 0:
+                continue
+            match p:
+                case 1:  # X
+                    self.circuit.append('Z_ERROR', i, self.error_probability)
+                case 2:  # Y
+                    self.circuit.append('Z_ERROR', i, self.error_probability)
+                case 3:  # Z
+                    self.circuit.append('X_ERROR', i, self.error_probability)
+                case _:
+                    raise ValueError(f'Invalid Pauli value {p} for qubit {i}.')
+        self.circuit.append('MPP', [target])
+        return MeasurementIdentifier(self.circuit.num_measurements - 1)
+
+    def place_detector(
+            self, measurements: list[MeasurementIdentifier], post_selection: bool = False) -> DetectorIdentifier:
         '''Places a detector with the given measurements.'''
         circuit = self.circuit
         self.circuit.append('DETECTOR', [i.target_rec(self) for i in measurements])
+        id = DetectorIdentifier(self.circuit.num_detectors - 1)
         if post_selection:
-            self.detectors_for_post_selection.append(DetectorIdentifier(self.circuit.num_detectors - 1))
+            self.detectors_for_post_selection.append(id)
+        return id
 
-    def place_observable_include(self, measurements: list[MeasurementIdentifier], id: ObservableIdentifier) -> None:
+    def place_observable_include(
+            self,
+            measurements: list[MeasurementIdentifier],
+            id: ObservableIdentifier | None = None) -> ObservableIdentifier:
         '''Adds measurement records to a specified logical observable.'''
+        id = id or ObservableIdentifier(self.circuit.num_observables)
         targets = [m.target_rec(self) for m in measurements]
         self.circuit.append('OBSERVABLE_INCLUDE', targets, id.id)
+        return id
+
+
+class MultiplexingCircuit:
+    '''\
+    A wrapper for util.Circuit.
+
+    A MultiplexingCircuit has two Circuit instances and dispatches the same operation for them.
+    This class assumes that the two circuits share the same Measurement/Detector/Observable identifiers.
+    '''
+    def __init__(self, circuit1: Circuit, circuit2: Circuit):
+        self.circuit1 = circuit1
+        self.circuit2 = circuit2
+        assert circuit1.mapping is circuit2.mapping
+        self.mapping = circuit1.mapping
+
+    def is_tainted_by_id(self, id: int) -> bool:
+        return self.circuit1.is_tainted_by_id(id)
+
+    def is_tainted_by_position(self, x: int, y: int) -> bool:
+        return self.circuit1.is_tainted_by_position(x, y)
+
+    def place_tick(self) -> None:
+        self.circuit1.place_tick()
+        self.circuit2.place_tick()
+
+    def place_single_qubit_gate(self, gate: str, target_position: tuple[int, int]) -> None:
+        self.circuit1.place_single_qubit_gate(gate, target_position)
+        self.circuit2.place_single_qubit_gate(gate, target_position)
+
+    def place_cx(self, control_position: tuple[int, int], target_position: tuple[int, int]) -> None:
+        self.circuit1.place_cx(control_position, target_position)
+        self.circuit2.place_cx(control_position, target_position)
+
+    def place_reset_z(self, target_position: tuple[int, int]) -> None:
+        self.circuit1.place_reset_z(target_position)
+        self.circuit2.place_reset_z(target_position)
+
+    def place_reset_x(self, target_position: tuple[int, int]) -> None:
+        self.circuit1.place_reset_x(target_position)
+        self.circuit2.place_reset_x(target_position)
+
+    def place_measurement_z(self, target_position: tuple[int, int]) -> MeasurementIdentifier:
+        m1 = self.circuit1.place_measurement_z(target_position)
+        m2 = self.circuit2.place_measurement_z(target_position)
+        assert m1 == m2
+        return m1
+
+    def place_measurement_x(self, target_position: tuple[int, int]) -> MeasurementIdentifier:
+        m1 = self.circuit1.place_measurement_x(target_position)
+        m2 = self.circuit2.place_measurement_x(target_position)
+        assert m1 == m2
+        return m1
+
+    def place_mpp(self, target: stim.PauliString) -> MeasurementIdentifier:
+        m1 = self.circuit1.place_mpp(target)
+        m2 = self.circuit2.place_mpp(target)
+        assert m1 == m2
+        return m1
+
+    def place_detector(
+            self, measurements: list[MeasurementIdentifier], post_selection: bool = False) -> DetectorIdentifier:
+        d1 = self.circuit1.place_detector(measurements, post_selection)
+        d2 = self.circuit2.place_detector(measurements, post_selection)
+        assert d1 == d2
+        return d1
+
+    def place_observable_include(
+            self,
+            measurements: list[MeasurementIdentifier],
+            id: ObservableIdentifier | None = None) -> ObservableIdentifier:
+        i = self.circuit1.place_observable_include(measurements, id)
+        j = self.circuit2.place_observable_include(measurements, id)
+        assert i == j
+        return i
+
+
+class SuppressNoise:
+    '''\
+    Context manager to temporarily suppress noise for a Circuit.
+
+    When used with a `with` statement, this class sets the circuit's error
+    probability to zero for the duration of the block, and restores it
+    afterward.
+
+    Example:
+        with SuppressNoise(circuit):
+            circuit.place_reset_x(q)
+            ...
+    '''
+    def __init__(self, circuit: Circuit | MultiplexingCircuit):
+        self.circuit = circuit
+        self.error_probability: float | None = None
+
+    def __enter__(self):
+        assert self.error_probability is None
+        if isinstance(self.circuit, Circuit):
+            self.error_probability = self.circuit.error_probability
+            self.circuit.error_probability = 0
+        else:
+            assert isinstance(self.circuit, MultiplexingCircuit)
+            assert self.circuit.circuit1.error_probability == self.circuit.circuit2.error_probability
+            self.error_probability = self.circuit.circuit1.error_probability
+            self.circuit.circuit1.error_probability = 0
+            self.circuit.circuit2.error_probability = 0
+
+    def __exit__(self, ex_type, ex_value, trace):
+        assert self.error_probability is not None
+        if isinstance(self.circuit, Circuit):
+            self.circuit.error_probability = self.error_probability
+        else:
+            assert isinstance(self.circuit, MultiplexingCircuit)
+            self.circuit.circuit1.error_probability = self.error_probability
+            self.circuit.circuit2.error_probability = self.error_probability
+        self.error_probability = None
