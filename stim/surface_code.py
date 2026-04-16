@@ -9,11 +9,11 @@ from util import Circuit, MeasurementIdentifier
 
 class SurfaceStabilizerPattern(enum.Enum):
     '''Represents a stabilizer pattern for the surface code.'''
-    FOUR_WEIGHT = auto(),
-    TWO_WEIGHT_UP = auto(),
-    TWO_WEIGHT_DOWN = auto(),
-    TWO_WEIGHT_LEFT = auto(),
-    TWO_WEIGHT_RIGHT = auto(),
+    FOUR_WEIGHT = auto()
+    TWO_WEIGHT_UP = auto()
+    TWO_WEIGHT_DOWN = auto()
+    TWO_WEIGHT_LEFT = auto()
+    TWO_WEIGHT_RIGHT = auto()
 
 
 class SurfaceZSyndromeMeasurement:
